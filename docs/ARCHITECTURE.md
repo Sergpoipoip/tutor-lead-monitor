@@ -411,6 +411,17 @@ Initial fuzzy features:
 
 Use a high threshold first (for example 90/100) and tune from labeled feedback. Borderline matches remain separate.
 
+Canonical occurrence selection is deterministic: highest eligible score, then most
+complete extraction, then lowest internal raw UUID. Replace the canonical raw
+pointer, classification, extraction, score reasons, and configuration versions
+together. Never lower the lead score when a poorer duplicate arrives; keep every
+occurrence and its historical processing evidence. Preserve lead identity and user
+state. Serialize the match/promotion decision with the deduplication transaction lock.
+
+Earlier rejected evidence may be attached through a canonical URL or a compatible
+exact fingerprint within the configured time window. Preserve its original
+processing explanation; do not recover historical fuzzy matches automatically.
+
 ## 9. Application use cases
 
 ### `run_collector(source_key)`
@@ -428,6 +439,14 @@ Use a high threshold first (for example 90/100) and tune from labeled feedback. 
 - normalizes, classifies, extracts, scores, deduplicates;
 - creates or attaches to a lead;
 - evaluates notification eligibility.
+
+### Manual failed-processing maintenance
+
+- inspect total failed count and a bounded list of internal UUIDs only;
+- reset only failed rows selected by one explicit UUID or a limit of 1–1,000;
+- claim reset candidates with row locks and skip busy records;
+- clear the failure category, preserve evidence, and process only on a separate invocation;
+- never print post bodies, external identifiers, contact details, or arbitrary errors.
 
 ### `send_immediate_alerts(limit)`
 

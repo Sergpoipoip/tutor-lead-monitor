@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime
 from threading import Event
+from uuid import UUID
 
 from alembic import command
 from alembic.config import Config
@@ -16,6 +17,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import Engine
 
 from tutor_lead_monitor.application.collect import run_collector
+from tutor_lead_monitor.application.failed import inspect_failed, reset_failed, validate_selection
 from tutor_lead_monitor.application.process import process_pending
 from tutor_lead_monitor.application.retention import run_retention
 from tutor_lead_monitor.collectors.fixture import FixtureCollector
@@ -102,10 +104,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "process",
             "pipeline",
             "retention",
+            "failed",
+            "retry-failed",
         ],
     )
     parser.add_argument("--source", default="fixture", help="Fixture registry key")
-    parser.add_argument("--limit", type=int, default=1000, help="Maximum pending items to process")
+    parser.add_argument("--limit", type=int, help="Maximum records (failed commands: 1..1000)")
+    parser.add_argument("--record-id", type=UUID, help="Internal failed-record UUID to reset")
     parser.add_argument(
         "--as-of",
         type=datetime.fromisoformat,
@@ -122,7 +127,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.as_of is not None:
             args.as_of = utc(args.as_of)
-        if args.limit < 1:
+        if args.command == "retry-failed":
+            validate_selection(args.record_id, args.limit)
+        elif args.record_id is not None:
+            raise ValueError("Record ID is only supported for retry-failed")
+        if args.command == "failed":
+            validate_selection(None, args.limit if args.limit is not None else 100)
+        if args.command != "retention" and (args.apply or args.dry_run):
+            raise ValueError("Apply/dry-run flags are only supported for retention")
+        if args.limit is not None and args.limit < 1:
             raise ValueError("Processing limit must be positive")
         settings = Settings()
         configure_logging(settings.log_level)
@@ -148,6 +161,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.info("migrations_applied")
             return 0
         check_ready(engine)
+        if args.command == "failed":
+            print(json.dumps(asdict(inspect_failed(engine, limit=args.limit or 100)), default=str))
+            return 0
+        if args.command == "retry-failed":
+            ids = reset_failed(engine, record_id=args.record_id, limit=args.limit)
+            print(json.dumps({"reset": len(ids), "record_ids": ids}, default=str))
+            return 0
         unsuccessful = False
         if args.command in {"collect", "pipeline"}:
             sources = (
@@ -185,7 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "collect":
                 return int(unsuccessful)
         if args.command in {"process", "pipeline"}:
-            processed = process_pending(engine, config, limit=args.limit, now=args.as_of)
+            processed = process_pending(engine, config, limit=args.limit or 1000, now=args.as_of)
             print(json.dumps(asdict(processed)))
             return int(processed.failed > 0 or (args.command == "pipeline" and unsuccessful))
         if args.command == "retention":

@@ -1,12 +1,12 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from tutor_lead_monitor.config import DeduplicationConfig
 from tutor_lead_monitor.db.models import Lead, LeadOccurrence, RawItem
-from tutor_lead_monitor.domain.enums import Goal, LessonFormat
+from tutor_lead_monitor.domain.enums import Goal, LessonFormat, Urgency
 from tutor_lead_monitor.processing.deduplicate import compatible, near_duplicate, tokens
 from tutor_lead_monitor.processing.models import Classification, ExtractedFields
 from tutor_lead_monitor.processing.normalize import NormalizedText, contact_signature, normalize
@@ -80,13 +80,7 @@ def find_duplicate(
         previous_contacts = contact_signature(occurrence.text)
         if current_contacts and previous_contacts and current_contacts != previous_contacts:
             continue
-        previous = ExtractedFields(
-            grade=lead.grade,
-            goals=tuple(Goal(g) for g in lead.goals),
-            format=LessonFormat(lead.format),
-            location_text=lead.location_text,
-            budget_text=lead.budget_text,
-        )
+        previous = lead_fields(lead)
         if not compatible(fields, previous):
             continue
         if (
@@ -112,4 +106,49 @@ def occurrence_exists(session: Session, raw_id: UUID) -> bool:
             select(LeadOccurrence.raw_item_id).where(LeadOccurrence.raw_item_id == raw_id)
         )
         is not None
+    )
+
+
+def rejected_exact_candidates(
+    session: Session, raw: RawItem, config: DeduplicationConfig
+) -> list[RawItem]:
+    """Only exact identities are strong enough to recover previously rejected evidence."""
+    instant = raw.published_at or raw.collected_at
+    effective_time = func.coalesce(RawItem.published_at, RawItem.collected_at)
+    text_match = and_(
+        RawItem.exact_fingerprint == raw.exact_fingerprint,
+        effective_time >= instant - timedelta(days=config.window_days),
+        effective_time <= instant + timedelta(days=config.window_days),
+    )
+    identity = (
+        or_(RawItem.canonical_url == raw.canonical_url, text_match)
+        if raw.canonical_url
+        else text_match
+    )
+    return list(
+        session.scalars(
+            select(RawItem)
+            .where(
+                RawItem.processing_status == "rejected",
+                RawItem.id != raw.id,
+                ~select(LeadOccurrence.raw_item_id)
+                .where(LeadOccurrence.raw_item_id == RawItem.id)
+                .exists(),
+                identity,
+            )
+            .order_by(RawItem.id)
+            .with_for_update()
+        )
+    )
+
+
+def lead_fields(lead: Lead) -> ExtractedFields:
+    return ExtractedFields(
+        grade=lead.grade,
+        goals=tuple(Goal(g) for g in lead.goals),
+        format=LessonFormat(lead.format),
+        location_text=lead.location_text,
+        budget_text=lead.budget_text,
+        urgency=Urgency(lead.urgency),
+        contact_available=lead.contact_available,
     )

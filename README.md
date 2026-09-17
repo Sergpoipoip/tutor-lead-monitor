@@ -100,8 +100,16 @@ PostgreSQL adapters in `db/`. Collectors only return domain records.
 Derived evidence is stored under reserved raw metadata key `_tlm_processing`;
 collectors cannot supply that key. Raw text, URLs, and other source metadata are
 preserved. No database migration is needed: revision `0001` already contains the
-necessary columns and JSONB storage. Historical canonical scores are not rewritten
-when another occurrence is attached.
+necessary columns and JSONB storage. Each occurrence retains its processing
+evidence even when a better occurrence becomes canonical.
+
+Rules and scoring defaults are versioned `rules-v2`. “Русская литература” is a
+literature subject, family requests for help are recognized, and “требуется
+учитель” alone is insufficient evidence of employment. The synthetic Russian
+corpus in `tests/fixtures/classification_ru.yml` covers positive, negative,
+ambiguous, and negated examples. Default bands are review **45–54**, daily digest
+**55–89**, and immediate **90–100**. A fresh “Ищу репетитора по литературе” scores
+61 and is digest-eligible; delivery remains a later milestone.
 
 Collection takes a per-source session advisory lock on a dedicated connection.
 Each page commits its valid items, run counters, and checkpoint together.
@@ -115,9 +123,25 @@ as failed when the next invocation acquires that source's lock.
 Each processing transaction claims one item with `FOR UPDATE SKIP LOCKED`.
 An item failure rolls back its derived changes and marks it failed with only an
 error category. Other items continue. Failed processing rows are not retried
-automatically; after correcting the cause, explicitly reset selected rows to
-`pending` through reviewed database maintenance. Existing occurrence uniqueness
-makes such reprocessing safe.
+automatically; after correcting the cause, use the bounded manual commands below.
+Existing occurrence uniqueness makes reprocessing safe.
+
+```sh
+# Total failed count plus at most 20 internal UUIDs; no post/error/contact content:
+uv run tutor-lead-monitor failed --limit 20
+# Reset only the selected failed record (replace the placeholder with a listed UUID):
+uv run tutor-lead-monitor retry-failed --record-id RECORD_UUID
+# Or explicitly reset up to 20 oldest available failed records:
+uv run tutor-lead-monitor retry-failed --limit 20
+uv run tutor-lead-monitor process --limit 20
+```
+
+Inspection defaults to 100 IDs. Reset requires exactly one UUID or an explicit
+limit of 1–1,000; it has no implicit “reset all.” Only failed rows are changed:
+their status becomes pending and their error category is cleared, preserving raw
+data and existing evidence. Locked rows are skipped and reported reset counts
+reflect actual changes; inspect again if a selected row is busy. Repeating a reset
+is a no-op until that row fails again. Resetting does not execute processing.
 
 Text deduplication uses a transaction advisory lock around candidate lookup and
 canonical-lead insertion. This serializes the decision step to prevent races even
@@ -143,6 +167,22 @@ source identity or URL match takes precedence over text differences, allowing
 edits/reposts to retain a common canonical identity. Matching is deliberately
 conservative: there is no stemming or synonym model, and fuzzy matching is
 restricted to recent candidates.
+
+Canonical promotion ranks eligible occurrences by score, then extraction
+completeness (known grade, goals, format, location, budget, urgency, contact), then
+lowest internal UUID for a stable tie-break. A higher score wins; at equal scores,
+more complete data wins. A lower-scoring occurrence remains evidence even if it
+adds fields. Promotion replaces classification, extraction, score, ordered reasons,
+and both versions together, so explanations remain consistent and scores never
+decrease. Lead identity, user state, feedback, and every occurrence remain intact.
+The same deduplication transaction lock protects promotion and insertion.
+
+An eligible occurrence also recovers previously rejected raw evidence with the
+same canonical URL, or the same nonempty exact fingerprint within the matching
+window and compatible classification, attributes, and known phone signatures.
+Recovered records become processed occurrences; their original classification and
+score evidence is retained. Fuzzy-only historical matches stay rejected for manual
+review. This recovery cannot restore raw records already removed by retention.
 
 ## Configuration
 

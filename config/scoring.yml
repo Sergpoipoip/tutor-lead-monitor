@@ -1,9 +1,9 @@
-version: rules-v1
+version: rules-v2
 fresh_hours: 12
 stale_days: 30
 thresholds:
   review: 45
-  digest: 65
+  digest: 55
   immediate: 90
 weights:
   seeking_tutor: 25

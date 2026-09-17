@@ -81,7 +81,7 @@ class BusinessConfig(StrictModel):
 
 class Thresholds(StrictModel):
     review: Score = 45
-    digest: Score = 65
+    digest: Score = 55
     immediate: Score = 90
 
     @model_validator(mode="after")
@@ -109,7 +109,7 @@ class ScoringWeights(StrictModel):
 
 
 class ScoringConfig(StrictModel):
-    version: str = "rules-v1"
+    version: str = "rules-v2"
     fresh_hours: PositiveInt = 12
     stale_days: PositiveInt = 30
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
@@ -141,7 +141,7 @@ class ClassificationRule(StrictModel):
 
 
 class ProcessingConfig(StrictModel):
-    version: str = "rules-v1"
+    version: str = "rules-v2"
     boilerplate: list[str] = Field(default_factory=list)
     rules: list[ClassificationRule]
 

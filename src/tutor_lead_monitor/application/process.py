@@ -10,12 +10,20 @@ from sqlalchemy.orm import Session
 from tutor_lead_monitor.config import AppConfig
 from tutor_lead_monitor.db.locks import DEDUPLICATION, MAINTENANCE, transaction_lock
 from tutor_lead_monitor.db.models import Lead, LeadOccurrence, RawItem
-from tutor_lead_monitor.db.pipeline import claim_pending, find_duplicate, occurrence_exists
-from tutor_lead_monitor.domain.enums import Intent, Subject
+from tutor_lead_monitor.db.pipeline import (
+    claim_pending,
+    find_duplicate,
+    lead_fields,
+    occurrence_exists,
+    rejected_exact_candidates,
+)
+from tutor_lead_monitor.domain.enums import Intent, LessonFormat, Subject, Urgency
 from tutor_lead_monitor.domain.models import JSONValue, utc
 from tutor_lead_monitor.processing.classify import classify
+from tutor_lead_monitor.processing.deduplicate import compatible
 from tutor_lead_monitor.processing.extract import extract
-from tutor_lead_monitor.processing.normalize import canonical_url, normalize
+from tutor_lead_monitor.processing.models import Classification, ExtractedFields, ScoreResult
+from tutor_lead_monitor.processing.normalize import canonical_url, contact_signature, normalize
 from tutor_lead_monitor.processing.score import score
 
 logger = logging.getLogger(__name__)
@@ -26,6 +34,85 @@ class ProcessingResult:
     processed: int = 0
     rejected: int = 0
     failed: int = 0
+
+
+def completeness(fields: ExtractedFields) -> int:
+    return sum(
+        (
+            fields.grade is not None,
+            len(set(fields.goals)),
+            fields.format != LessonFormat.UNKNOWN,
+            fields.location_text is not None,
+            fields.budget_text is not None,
+            fields.urgency != Urgency.UNKNOWN,
+            fields.contact_available,
+        )
+    )
+
+
+def promote(
+    lead: Lead,
+    raw: RawItem,
+    classification: Classification,
+    fields: ExtractedFields,
+    scored: ScoreResult,
+) -> None:
+    # Score first keeps reasons and versions coherent; never synthesize a hybrid score.
+    lead.canonical_raw_item_id = raw.id
+    lead.intent = classification.intent.value
+    lead.subject = classification.subject.value
+    lead.grade = fields.grade
+    lead.goals = [g.value for g in fields.goals]
+    lead.format = fields.format.value
+    lead.location_text = fields.location_text
+    lead.budget_text = fields.budget_text
+    lead.urgency = fields.urgency.value
+    lead.contact_available = fields.contact_available
+    lead.score = scored.score
+    lead.score_reasons = [cast(dict[str, JSONValue], asdict(r)) for r in scored.reasons]
+    lead.classification_version = classification.version
+    lead.scoring_version = scored.version
+
+
+def update_seen(lead: Lead, raw: RawItem) -> None:
+    lead.last_seen_at = max(lead.last_seen_at, raw.collected_at)
+    if raw.published_at is not None:
+        lead.first_published_at = min(lead.first_published_at or raw.published_at, raw.published_at)
+
+
+def recover_rejected(
+    session: Session,
+    lead: Lead,
+    raw: RawItem,
+    classification: Classification,
+    fields: ExtractedFields,
+    config: AppConfig,
+) -> None:
+    for earlier in rejected_exact_candidates(session, raw, config.business.deduplication):
+        same_url = bool(raw.canonical_url and raw.canonical_url == earlier.canonical_url)
+        if not same_url:
+            text = normalize(earlier.text, tuple(config.processing.boilerplate))
+            previous = classify(text.readable, config.processing)
+            contacts, old_contacts = contact_signature(raw.text), contact_signature(earlier.text)
+            if (
+                not text.fingerprint_text
+                or previous.intent != classification.intent
+                or previous.subject != classification.subject
+                or not compatible(fields, extract(text.readable))
+                or (contacts and old_contacts and contacts != old_contacts)
+            ):
+                continue
+        session.add(
+            LeadOccurrence(
+                lead_id=lead.id,
+                raw_item_id=earlier.id,
+                match_method="exact_url" if same_url else "exact_text",
+                similarity=Decimal("100"),
+            )
+        )
+        # Keep its original processing evidence, including why it was rejected.
+        earlier.processing_status = "processed"
+        update_seen(lead, earlier)
 
 
 def process_item(session: Session, raw: RawItem, config: AppConfig, now: datetime) -> str:
@@ -71,33 +158,24 @@ def process_item(session: Session, raw: RawItem, config: AppConfig, now: datetim
         return "rejected"
     if matched is None:
         lead = Lead(
-            canonical_raw_item_id=raw.id,
-            intent=classification.intent.value,
-            subject=classification.subject.value,
-            grade=fields.grade,
-            goals=[g.value for g in fields.goals],
-            format=fields.format.value,
-            location_text=fields.location_text,
-            budget_text=fields.budget_text,
-            urgency=fields.urgency.value,
-            contact_available=fields.contact_available,
-            score=scored.score,
-            score_reasons=[cast(dict[str, JSONValue], asdict(r)) for r in scored.reasons],
-            classification_version=classification.version,
-            scoring_version=scored.version,
             first_published_at=raw.published_at,
             last_seen_at=raw.collected_at,
         )
+        promote(lead, raw, classification, fields, scored)
         session.add(lead)
         session.flush()
         method, similarity = "exact_id", 100.0
     else:
         lead, method, similarity = matched
-        lead.last_seen_at = max(lead.last_seen_at, raw.collected_at)
-        if raw.published_at is not None:
-            lead.first_published_at = min(
-                lead.first_published_at or raw.published_at, raw.published_at
-            )
+        current_rank = (
+            lead.score,
+            completeness(lead_fields(lead)),
+            -lead.canonical_raw_item_id.int,
+        )
+        candidate_rank = (scored.score, completeness(fields), -raw.id.int)
+        if eligible and candidate_rank > current_rank:
+            promote(lead, raw, classification, fields, scored)
+        update_seen(lead, raw)
     if not occurrence_exists(session, raw.id):
         session.add(
             LeadOccurrence(
@@ -108,6 +186,8 @@ def process_item(session: Session, raw: RawItem, config: AppConfig, now: datetim
             )
         )
     raw.processing_status = "processed"
+    if eligible:
+        recover_rejected(session, lead, raw, classification, fields, config)
     return "processed"
 
 

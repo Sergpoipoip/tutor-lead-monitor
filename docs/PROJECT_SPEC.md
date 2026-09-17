@@ -143,8 +143,8 @@ Clamp the final score to `0..100`.
 Initial notification thresholds:
 
 - `90..100`: immediate alert and include in digest;
-- `65..89`: daily digest;
-- `45..64`: persist for review, omit from normal digest by default;
+- `55..89`: daily digest;
+- `45..54`: persist for review, omit from normal digest by default;
 - `0..44`: rejected/no notification.
 
 All thresholds and weights must be configurable through version-controlled YAML or typed settings, not only environment variables.

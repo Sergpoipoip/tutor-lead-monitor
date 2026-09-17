@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from tutor_lead_monitor.config import ProcessingConfig, ScoringConfig, load_config
@@ -15,6 +16,36 @@ from tutor_lead_monitor.processing.normalize import canonical_url, normalize
 from tutor_lead_monitor.processing.score import score
 
 NOW = datetime(2026, 1, 1, 13, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "text,intent,subject",
+    yaml.safe_load((Path(__file__).parents[1] / "fixtures/classification_ru.yml").read_text()),
+)
+def test_russian_classification_corpus(
+    text: str, intent: str, subject: str, rules: ProcessingConfig
+) -> None:
+    result = classify(text, rules)
+    assert result.intent.value == intent
+    assert result.subject.value == subject
+    assert result.version == "rules-v2"
+    assert result == classify(text, rules)
+    for evidence in result.evidence:
+        assert text[evidence.start : evidence.end]
+        assert evidence.rule_id in result.matched_rule_ids
+    if "русской литературе" in text:
+        assert "subject_russian" not in result.matched_rule_ids
+
+
+def test_straightforward_request_is_digest_eligible(rules: ProcessingConfig) -> None:
+    text = "Ищу репетитора по литературе"
+    config = load_config(Path("config")).scoring
+    result = score(classify(text, rules), extract(text), published_at=NOW, now=NOW, config=config)
+    assert result.score == 61
+    assert config.thresholds.review == 45
+    assert config.thresholds.digest == ScoringConfig().thresholds.digest == 55
+    assert config.thresholds.digest <= result.score < config.thresholds.immediate == 90
+    assert result.version == "rules-v2"
 
 
 @pytest.fixture
