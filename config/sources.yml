@@ -1,0 +1,18 @@
+sources:
+  - key: fixture
+    kind: fixture
+    display_name: Synthetic literature examples
+    owner: Tutor Lead Monitor
+    enabled: true
+    policy_status: approved
+    access_method: fixture
+    collector_interval_seconds: 300
+    config:
+      page_size: 2
+    policy:
+      authorization_basis: Synthetic records authored for local testing
+      terms_review: No external platform or network access
+      rate_limit: Local only; no requests
+      retained_fields: [external_id, url, text, published_at, collected_at, metadata]
+      notes: Fixed timestamps and reserved example.invalid URLs; no personal data
+    retention_days: 90

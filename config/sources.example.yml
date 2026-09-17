@@ -1,0 +1,22 @@
+# Reference only; the application reads sources.yml.
+sources:
+  - key: telegram_authorized_channel_example
+    kind: telegram_bot_updates
+    display_name: Authorized Telegram channel
+    owner: Replace with the channel owner
+    enabled: false
+    policy_status: pending
+    access_method: authorized_bot
+    collector_interval_seconds: 300
+    credential_env: TELEGRAM_BOT_TOKEN
+    config:
+      allowed_chat_ids: []
+    policy:
+      authorization_basis: Requires explicit owner permission and bot membership
+      terms_review: Pending review before implementation and enablement
+      rate_limit: Pending current official API review
+      retained_fields: [external_id, url, text, published_at, collected_at]
+      reviewed_at: null
+      reviewer: null
+      notes: Unsupported in Milestone 1; do not enable
+    retention_days: 90

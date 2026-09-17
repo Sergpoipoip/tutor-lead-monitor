@@ -1,0 +1,54 @@
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from pydantic import SecretStr
+from sqlalchemy import Connection, Engine
+from sqlalchemy.orm import Session
+
+from tutor_lead_monitor.config import Settings, SourceConfig, load_config
+from tutor_lead_monitor.db.session import create_db_engine
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def source_config() -> SourceConfig:
+    return load_config(ROOT / "config").registry.sources[0]
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("Set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    settings = Settings(database_url=SecretStr(url), _env_file=None)
+    db = create_db_engine(settings)
+    if not (db.url.database or "").endswith("_test"):
+        raise pytest.UsageError("Integration database name must end with _test (schema is reset)")
+    yield db
+    db.dispose()
+
+
+def alembic_config(connection: Connection) -> Config:
+    config = Config(str(ROOT / "alembic.ini"))
+    config.attributes["connection"] = connection
+    return config
+
+
+@pytest.fixture
+def migrated_engine(engine: Engine) -> Iterator[Engine]:
+    # Use only an explicitly selected disposable test database; never create_all.
+    with engine.begin() as connection:
+        command.downgrade(alembic_config(connection), "base")
+        command.upgrade(alembic_config(connection), "head")
+    yield engine
+
+
+@pytest.fixture
+def session(migrated_engine: Engine) -> Iterator[Session]:
+    with Session(migrated_engine) as db, db.begin():
+        yield db

@@ -1,0 +1,49 @@
+name: tutor-lead-monitor
+
+x-app: &app
+  build: .
+  environment:
+    DATABASE_URL: postgresql+psycopg://tutor_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}@postgres:5432/tutor_lead_monitor
+    CONFIG_DIR: /app/config
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  init: true
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: tutor_lead_monitor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/10-app-user.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tutor_lead_monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    <<: *app
+    command: ["tutor-lead-monitor", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    <<: *app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "tutor-lead-monitor", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:

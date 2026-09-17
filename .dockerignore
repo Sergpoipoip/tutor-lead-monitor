@@ -1,0 +1,14 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!config/
+!config/*.yml
+config/*.local.yml
+!alembic.ini
+!migrations/
+!migrations/**
+**/__pycache__/

@@ -1,0 +1,20 @@
+version: rules-v1
+thresholds:
+  review: 45
+  digest: 65
+  immediate: 90
+weights:
+  seeking_tutor: 25
+  literature: 30
+  russian_and_literature: 15
+  exam: 10
+  olympiad: 12
+  online: 8
+  grade_stated: 4
+  fresh: 6
+  budget_stated: 3
+  contact_available: 2
+  offering_tutoring: -70
+  school_or_agency_ad: -55
+  teaching_job: -35
+  closed_or_stale: -50

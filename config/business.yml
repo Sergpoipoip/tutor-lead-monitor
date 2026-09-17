@@ -1,0 +1,10 @@
+timezone: UTC
+digest_time: "19:00:00"
+send_empty_digest: false
+retention:
+  raw_rejected_days: 30
+  leads_days: 90
+  notifications_days: 180
+deduplication:
+  window_days: 30
+  similarity_threshold: 90
