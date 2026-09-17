@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, time
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -9,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from tutor_lead_monitor.domain.enums import Intent, Subject
 from tutor_lead_monitor.domain.models import JSONValue, utc
 
 PositiveInt = Annotated[int, Field(gt=0)]
@@ -108,8 +110,47 @@ class ScoringWeights(StrictModel):
 
 class ScoringConfig(StrictModel):
     version: str = "rules-v1"
+    fresh_hours: PositiveInt = 12
+    stale_days: PositiveInt = 30
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
     thresholds: Thresholds = Field(default_factory=Thresholds)
+
+
+class ClassificationRule(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    pattern: str = Field(min_length=1)
+    intent: Intent | None = None
+    subject: Subject | None = None
+    priority: int = 0
+    confidence: float = Field(default=0.9, ge=0, le=1)
+
+    @field_validator("pattern")
+    @classmethod
+    def valid_pattern(cls, value: str) -> str:
+        try:
+            re.compile(value, re.IGNORECASE)
+        except re.error:
+            raise ValueError("Invalid rule regex") from None
+        return value
+
+    @model_validator(mode="after")
+    def one_label(self) -> Self:
+        if (self.intent is None) == (self.subject is None):
+            raise ValueError("Each rule requires exactly one intent or subject")
+        return self
+
+
+class ProcessingConfig(StrictModel):
+    version: str = "rules-v1"
+    boilerplate: list[str] = Field(default_factory=list)
+    rules: list[ClassificationRule]
+
+    @model_validator(mode="after")
+    def unique_rules(self) -> Self:
+        ids = [rule.id for rule in self.rules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Rule IDs must be unique")
+        return self
 
 
 class SourcePolicy(StrictModel):
@@ -161,7 +202,7 @@ class SourceConfig(StrictModel):
         if self.enabled and self.policy_status != "approved":
             raise ValueError("Enabled sources require approved policy")
         if self.enabled and self.kind != "fixture":
-            raise ValueError("Only fixture sources can be enabled in Milestone 1")
+            raise ValueError("Only fixture sources can be enabled in Milestones 1 and 2")
         if self.kind == "fixture":
             if self.access_method != "fixture":
                 raise ValueError("Fixture source requires fixture access method")
@@ -171,6 +212,7 @@ class SourceConfig(StrictModel):
 
 class FixtureOptions(StrictModel):
     page_size: PositiveInt = 2
+    dataset: Literal["primary", "crosspost"] = "primary"
 
 
 class SourceRegistry(StrictModel):
@@ -199,6 +241,7 @@ class AppConfig(StrictModel):
     scoring: ScoringConfig
     registry: SourceRegistry
     queries: QueryConfig
+    processing: ProcessingConfig
 
 
 def load_config(directory: Path) -> AppConfig:
@@ -208,6 +251,7 @@ def load_config(directory: Path) -> AppConfig:
         "scoring": ScoringConfig,
         "sources": SourceRegistry,
         "queries": QueryConfig,
+        "processing": ProcessingConfig,
     }
     loaded: dict[str, BaseModel] = {}
     for name, model in models.items():
@@ -222,5 +266,6 @@ def load_config(directory: Path) -> AppConfig:
             "scoring": loaded["scoring"],
             "registry": loaded["sources"],
             "queries": loaded["queries"],
+            "processing": loaded["processing"],
         }
     )

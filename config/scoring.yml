@@ -1,4 +1,6 @@
 version: rules-v1
+fresh_hours: 12
+stale_days: 30
 thresholds:
   review: 45
   digest: 65

@@ -12,7 +12,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from tutor_lead_monitor.cli import check_ready
-from tutor_lead_monitor.collectors.fixture import FixtureCollector
+from tutor_lead_monitor.collectors.fixture import TEXTS, FixtureCollector
 from tutor_lead_monitor.config import SourceConfig
 from tutor_lead_monitor.db.base import Base
 from tutor_lead_monitor.db.models import (
@@ -84,7 +84,9 @@ async def test_raw_retry_preserves_evidence_and_checkpoint(
     assert sync_source(session, source_config) == source_id
     collected_pages = await pages()
     for page in collected_pages:
-        assert persist_page(session, source_id=source_id, source_key="fixture", page=page) == 2
+        assert persist_page(session, source_id=source_id, source_key="fixture", page=page) == len(
+            page.items
+        )
     replay = replace(
         collected_pages[0],
         items=tuple(
@@ -93,7 +95,7 @@ async def test_raw_retry_preserves_evidence_and_checkpoint(
         ),
     )
     assert persist_page(session, source_id=source_id, source_key="fixture", page=replay) == 0
-    assert session.scalar(select(func.count()).select_from(RawItem)) == 4
+    assert session.scalar(select(func.count()).select_from(RawItem)) == len(TEXTS)
     raw = session.scalars(select(RawItem).order_by(RawItem.external_id)).first()
     assert raw is not None and raw.text == collected_pages[0].items[0].text
     assert raw.metadata_ == {"fixture_version": 1}

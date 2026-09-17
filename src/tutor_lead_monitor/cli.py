@@ -5,6 +5,8 @@ import logging
 import signal
 import time
 from collections.abc import Sequence
+from dataclasses import asdict
+from datetime import datetime
 from threading import Event
 
 from alembic import command
@@ -13,11 +15,14 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine
 
+from tutor_lead_monitor.application.collect import run_collector
+from tutor_lead_monitor.application.process import process_pending
+from tutor_lead_monitor.application.retention import run_retention
 from tutor_lead_monitor.collectors.fixture import FixtureCollector
 from tutor_lead_monitor.config import FixtureOptions, Settings, load_config
 from tutor_lead_monitor.db.repositories import sync_source
 from tutor_lead_monitor.db.session import check_database, create_db_engine, session_factory
-from tutor_lead_monitor.domain.models import CollectionContext
+from tutor_lead_monitor.domain.models import CollectionContext, utc
 from tutor_lead_monitor.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -83,7 +88,7 @@ def serve(engine: Engine, interval: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Tutor Lead Monitor — Milestone 1 foundation")
+    parser = argparse.ArgumentParser(description="Tutor Lead Monitor — local pipeline")
     parser.add_argument(
         "command",
         choices=[
@@ -93,13 +98,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sync-sources",
             "fixture",
             "serve",
+            "collect",
+            "process",
+            "pipeline",
+            "retention",
         ],
     )
     parser.add_argument("--source", default="fixture", help="Fixture registry key")
+    parser.add_argument("--limit", type=int, default=1000, help="Maximum pending items to process")
+    parser.add_argument(
+        "--as-of",
+        type=datetime.fromisoformat,
+        help="Aware ISO timestamp for controlled scoring/retention",
+    )
+    retention_mode = parser.add_mutually_exclusive_group()
+    retention_mode.add_argument("--apply", action="store_true", help="Apply retention deletions")
+    retention_mode.add_argument(
+        "--dry-run", action="store_true", help="Preview retention (default)"
+    )
     args = parser.parse_args(argv)
     configure_logging()
     engine: Engine | None = None
     try:
+        if args.as_of is not None:
+            args.as_of = utc(args.as_of)
+        if args.limit < 1:
+            raise ValueError("Processing limit must be positive")
         settings = Settings()
         configure_logging(settings.log_level)
         config = load_config(settings.config_dir)
@@ -111,7 +135,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not source.enabled or source.policy_status != "approved" or source.kind != "fixture":
                 raise ValueError("Fixture source must be enabled and approved")
             options = FixtureOptions.model_validate(source.config)
-            asyncio.run(fixture_preview(FixtureCollector(source.key, options.page_size)))
+            asyncio.run(
+                fixture_preview(FixtureCollector(source.key, options.page_size, options.dataset))
+            )
             return 0
         engine = create_db_engine(settings)
         if args.command == "migrate":
@@ -122,6 +148,60 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.info("migrations_applied")
             return 0
         check_ready(engine)
+        unsuccessful = False
+        if args.command in {"collect", "pipeline"}:
+            sources = (
+                config.registry.sources
+                if args.command == "pipeline"
+                else [s for s in config.registry.sources if s.key == args.source]
+            )
+            if not sources:
+                raise ValueError("Unknown source")
+            for source in sources:
+                if args.command == "pipeline" and not source.enabled:
+                    continue
+                try:
+                    options = FixtureOptions.model_validate(source.config)
+                    outcome = asyncio.run(
+                        run_collector(
+                            engine,
+                            source,
+                            FixtureCollector(source.key, options.page_size, options.dataset),
+                        )
+                    )
+                    print(json.dumps(asdict(outcome), default=str))
+                    unsuccessful |= outcome.status != "succeeded"
+                except Exception as error:
+                    if args.command == "collect":
+                        raise
+                    unsuccessful = True
+                    logger.error(
+                        "collection_failed",
+                        extra={
+                            "source_key": source.key,
+                            "error_category": type(error).__name__,
+                        },
+                    )
+            if args.command == "collect":
+                return int(unsuccessful)
+        if args.command in {"process", "pipeline"}:
+            processed = process_pending(engine, config, limit=args.limit, now=args.as_of)
+            print(json.dumps(asdict(processed)))
+            return int(processed.failed > 0 or (args.command == "pipeline" and unsuccessful))
+        if args.command == "retention":
+            print(
+                json.dumps(
+                    asdict(
+                        run_retention(
+                            engine,
+                            config.business.retention,
+                            dry_run=not args.apply,
+                            now=args.as_of,
+                        )
+                    )
+                )
+            )
+            return 0
         if args.command == "sync-sources":
             with session_factory(engine).begin() as session:
                 for source in config.registry.sources:

@@ -51,3 +51,16 @@ def test_collector_requires_stable_id() -> None:
             collected_at=datetime.now(UTC),
             text="synthetic",
         )
+
+
+def test_collector_cannot_overwrite_processing_metadata() -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        CollectedItem(
+            "fixture",
+            "id",
+            None,
+            None,
+            datetime.now(UTC),
+            "synthetic",
+            metadata={"_tlm_processing": {}},
+        )

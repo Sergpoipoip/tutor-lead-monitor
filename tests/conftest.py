@@ -24,6 +24,10 @@ def source_config() -> SourceConfig:
 def engine() -> Iterator[Engine]:
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
+        if os.environ.get("CI") or os.environ.get("REQUIRE_INTEGRATION_TESTS"):
+            raise pytest.UsageError(
+                "TEST_DATABASE_URL is required in CI; integration tests cannot skip"
+            )
         pytest.skip("Set TEST_DATABASE_URL to run PostgreSQL integration tests")
     settings = Settings(database_url=SecretStr(url), _env_file=None)
     db = create_db_engine(settings)

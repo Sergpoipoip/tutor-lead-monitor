@@ -23,7 +23,7 @@ def test_versioned_configuration() -> None:
     assert config.scoring.weights.offering_tutoring == -70
     assert config.scoring.thresholds.immediate == 90
     assert config.business.retention.leads_days == 90
-    assert [s.kind for s in config.registry.sources if s.enabled] == ["fixture"]
+    assert {s.kind for s in config.registry.sources if s.enabled} == {"fixture"}
 
 
 def test_environment_precedence_and_redaction(
@@ -72,7 +72,7 @@ def test_source_policy_and_scope(source_config: SourceConfig) -> None:
     with pytest.raises(ValidationError, match="approved"):
         SourceConfig.model_validate(data)
     data.update(policy_status="approved", kind="web_search", access_method="public_web")
-    with pytest.raises(ValidationError, match="Milestone 1"):
+    with pytest.raises(ValidationError, match="Milestones 1 and 2"):
         SourceConfig.model_validate(data)
     data["enabled"] = False
     assert not SourceConfig.model_validate(data).enabled

@@ -29,6 +29,8 @@ class CollectedItem:
     def __post_init__(self) -> None:
         if not self.source_key or not self.external_id:
             raise ValueError("Source key and stable external ID are required")
+        if "_tlm_processing" in self.metadata:
+            raise ValueError("Collector metadata uses a reserved processing key")
         try:
             json.dumps(dict(self.metadata), allow_nan=False)
         except (TypeError, ValueError):

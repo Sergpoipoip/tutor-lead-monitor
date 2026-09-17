@@ -1,0 +1,45 @@
+version: rules-v1
+boilerplate:
+  - "Репост из родительского чата"
+  - "Подписывайтесь на наш канал"
+rules:
+  - id: intent_job
+    pattern: '\b(ваканси\w*|в штат|школа\s+ищет|требуется\s+учитель|school\s+seeks)\b'
+    intent: teaching_job
+    priority: 100
+  - id: intent_agency
+    pattern: '\b(образовательн\w*\s+центр|школа\s+объявляет\s+набор|набор\s+на\s+курс|авторский\s+курс)\b'
+    intent: school_or_agency_ad
+    priority: 90
+  - id: intent_offer
+    pattern: '\b(я\s+репетитор|набираю\s+учеников|провожу\s+занятия|мои\s+услуги|i\s+am\s+a\s+\w*\s*tutor)\b'
+    intent: offering_tutoring
+    priority: 80
+  - id: intent_seek_explicit
+    pattern: '\b(?:(?:ищу|ищем|нужен|нужна|посоветуйте|порекомендуйте)\s+(?:хорош\w+\s+)?(?:репетитор\w*|преподавател\w*|учител\w*)|looking\s+for\s+a\s+(?:literature\s+)?tutor)\b'
+    intent: seeking_tutor
+    priority: 70
+    confidence: 0.98
+  - id: intent_negated_request
+    pattern: '\b(?:не\s+(?:ищу|ищем)|не\s+нуж(?:ен|на)\s+репетитор\w*)\b'
+    intent: uncertain
+    priority: 75
+    confidence: 0.7
+  - id: intent_seek_indirect
+    pattern: '\b(подтянуть\s+литературу|помочь\s+(?:дочери\s+|сыну\s+)?(?:с\s+литературой|с\s+сочинением)|проблемы\s+с\s+литературой|просела\s+литература|кто\s+(?:может\s+позаниматься|готовит\s+к)|нужно\s+подготовить\s+к)\b'
+    intent: seeking_tutor
+    priority: 60
+    confidence: 0.8
+  - id: intent_info
+    pattern: '\b(расписание|результаты\s+экзамен|новости|опубликован\w*|информация\s+о)\b'
+    intent: informational
+    priority: 10
+  - id: subject_literature
+    pattern: '\b(литератур\w*|literature)\b'
+    subject: literature
+  - id: subject_russian
+    pattern: '\b(русск\w*|russian)\b'
+    subject: russian_language
+  - id: subject_other
+    pattern: '\b(математик\w*|физик\w*|хими\w*|английск\w*|биологи\w*)\b'
+    subject: other

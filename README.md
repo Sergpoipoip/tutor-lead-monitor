@@ -1,208 +1,273 @@
 # Tutor Lead Monitor
 
-Milestone 1 foundation for discovering permitted literature-tutor requests.
-The authoritative documents are [PROJECT_SPEC](docs/PROJECT_SPEC.md),
-[ARCHITECTURE](docs/ARCHITECTURE.md), and [SOURCES](docs/SOURCES.md).
+Milestones 1–2: a local, deterministic pipeline for permitted literature-tutor
+requests. Read the authoritative [product specification](docs/PROJECT_SPEC.md),
+[architecture](docs/ARCHITECTURE.md), and [source policy](docs/SOURCES.md), version 0.2.
 
-Implemented: typed configuration, JSON logging, domain contracts, a deterministic
-fixture collector, PostgreSQL persistence primitives, initial migrations, and a
-local container lifecycle. Classification, scoring, fuzzy deduplication, retention
-jobs, Telegram delivery, real collectors, and production scheduling come in later
-milestones. No third-party account or API credential is required now.
+Implemented: typed configuration, JSON logs, fixture collection, atomic raw
+persistence, normalization, rule classification, conservative extraction,
+explainable scoring, exact/fuzzy deduplication, and retention with dry-run counts.
+Telegram delivery, real collectors, production scheduling, and deployment remain
+later milestones. No provider account or API credential is needed.
 
 ## Local setup
 
-Prerequisites: Python 3.12+ and uv, plus Docker Desktop/Engine with Compose v2
-(or an existing PostgreSQL 16+ server). Run commands from the repository root.
+Prerequisites: Python 3.12+, uv, and Docker with Compose v2 (or PostgreSQL 16+).
+Run commands from the repository root.
 
 ```sh
 uv sync --locked
 cp .env.example .env
 ```
 
-Edit `.env`: replace the two database password placeholders with different locally
-generated passwords, and put the application password in `DATABASE_URL` as well.
-For example, run `openssl rand -hex 24` separately for each password. Hex passwords
-avoid URL-encoding issues with Compose interpolation. These are local database
-passwords, not provider credentials. `.env` is ignored and excluded from the image.
-
-For host Python with container PostgreSQL:
+Replace the two database password placeholders in `.env` with independently
+generated local passwords (for example, `openssl rand -hex 24` for each).
+Put the application password in `DATABASE_URL` too. Hex passwords avoid URL
+escaping problems in Compose. `.env` is ignored and excluded from the image.
 
 ```sh
 docker compose up -d --wait postgres
 uv run tutor-lead-monitor check-config
 uv run tutor-lead-monitor migrate
 uv run tutor-lead-monitor sync-sources
-uv run tutor-lead-monitor fixture
 uv run tutor-lead-monitor healthcheck
-uv run tutor-lead-monitor serve
 ```
 
-`fixture` previews stable IDs and page cursors without writing records or printing
-post text. It produces four synthetic records across two pages. Their IDs and UTC
-timestamps are fixed; `since` is exclusive, and the versioned cursor resumes by
-offset. The persistence primitives are exercised separately by integration tests.
-The fixture-to-lead processing use case is Milestone 2.
+PostgreSQL is exposed on loopback. If changing `POSTGRES_PORT`, update the
+host-side URL. Compose constructs its own URL using hostname `postgres`.
+The `tutor_app` role owns the application database and has no superuser,
+create-database, or create-role privileges. Initialization runs only on an empty
+volume; editing `.env` does not change an existing role's password.
 
-`serve` validates configuration and the current migration revision, then stays
-running with periodic database health logs. SIGINT/SIGTERM stops it cleanly. It
-does not schedule collection or send notifications in this milestone. Health
-failures during the loop are reported and rechecked at the next interval.
-
-## Docker Compose
-
-After filling in `.env`:
+## Controlled pipeline commands
 
 ```sh
-docker compose up --build -d --wait
-docker compose ps
-docker compose logs --tail=50 app migrate
-docker compose exec app tutor-lead-monitor fixture
-docker compose exec app tutor-lead-monitor sync-sources
-docker compose down
+# Preview stable IDs/cursors without database writes or post text output:
+uv run tutor-lead-monitor fixture
+# Collect one approved fixture source:
+uv run tutor-lead-monitor collect --source fixture
+uv run tutor-lead-monitor collect --source fixture_crosspost
+# Process pending items independently (bounded work per invocation):
+uv run tutor-lead-monitor process --limit 1000 --as-of 2026-01-01T13:00:00Z
+# Collect every enabled fixture source, then process pending items:
+uv run tutor-lead-monitor pipeline --as-of 2026-01-01T13:00:00Z
+# Repeating the pipeline is safe:
+uv run tutor-lead-monitor pipeline --as-of 2026-01-01T13:00:00Z
 ```
 
-The `postgres` service initializes a separate `tutor_app` database owner with
-`NOSUPERUSER`, `NOCREATEDB`, and `NOCREATEROLE`. A one-shot `migrate` service must
-succeed before `app` starts. The application container runs as a non-root OS user.
-Only PostgreSQL is published, on loopback; change `POSTGRES_PORT` if needed and
-update the host-side `DATABASE_URL` accordingly. Compose constructs its own URL
-with hostname `postgres`.
+The primary fixture contains 13 synthetic records; a second source contains one
+near duplicate. The original four IDs, texts, timestamps, and URLs are preserved.
+Cursors remain version 1, so an existing offset of 4 resumes at the appended
+examples. Cross-post cursors also identify their dataset. The fixture has no real
+contact details and uses reserved `example.invalid` URLs.
 
-The named volume survives `docker compose down`. Initialization scripts run only
-on an empty volume: changing an environment password does not update an existing
-database role. Change existing passwords with PostgreSQL administration tools.
-`docker compose down --volumes` deletes local database data; use it only for an
-intentional disposable reset.
+Fixture publication/collection times are fixed at `2026-01-01T12:00:00Z`.
+`--as-of` supplies a reproducible evaluation clock for scoring and retention;
+it must include a timezone. Omit it to use current UTC time. At the demonstration
+clock, a clean run produces **14 raw records, 6 canonical leads, 8 occurrences**:
+8 processed candidates (including two duplicates) and 6 rejected records. Using
+the current clock makes the old fixtures stale and can change eligibility.
 
-This is a local setup, not a production deployment. Always-on scheduling, restart
-policies, backups/restoration, log rotation, monitoring, and unattended-operation
-verification remain Milestone 6.
+The processing limit applies to each explicit invocation; run `process` again
+when more pending records remain. Collection/processing failures produce a
+nonzero CLI exit status and sanitized error categories. The complete pipeline
+continues with other enabled sources after a source failure. No command sends
+notifications or starts a collection scheduler.
+
+## Processing and transaction boundaries
+
+Pure functions live in `processing/`; use cases in `application/` orchestrate
+PostgreSQL adapters in `db/`. Collectors only return domain records.
+
+- Normalization preserves raw text, creates readable NFKC text, canonicalizes
+  HTTP(S) URLs and tracking parameters, and creates a SHA-256 fingerprint from
+  case-folded, punctuation/whitespace-normalized text with ё/е matching, configured
+  boilerplate removal, and URL/phone placeholders.
+- Classification uses versioned regex rules, stable IDs, explicit priorities,
+  confidence, and evidence offsets into normalized text. Both explicit and
+  indirect needs are recognized. Offering, agency, and vacancy rules take priority.
+- Extraction records grade, goals, format, labeled location, urgency, budget,
+  contact availability, and evidence. Unknown/conflicting fields remain unset.
+  Contact availability comes from explicit text or authorized source metadata
+  `response_available: true`; a generic source URL alone earns no contact bonus.
+- Scoring returns ordered reasons, clamps to 0–100, and persists its version.
+  Future/unknown publication timestamps receive no freshness bonus. The freshness
+  cutoff is exclusive; staleness begins at the configured day boundary.
+- Seeking/uncertain literature or mixed Russian/literature items at or above the
+  review threshold create leads. Other items remain raw records marked rejected,
+  with their classification/extraction/score evidence retained for review.
+
+Derived evidence is stored under reserved raw metadata key `_tlm_processing`;
+collectors cannot supply that key. Raw text, URLs, and other source metadata are
+preserved. No database migration is needed: revision `0001` already contains the
+necessary columns and JSONB storage. Historical canonical scores are not rewritten
+when another occurrence is attached.
+
+Collection takes a per-source session advisory lock on a dedicated connection.
+Each page commits its valid items, run counters, and checkpoint together.
+Individual persistence failures roll back to savepoints; later valid items still
+persist, but the cursor and high-water mark never advance beyond the first failed
+page. Retrying replays those pages and ignores already stored source IDs. Fix
+persistent malformed source records before retrying; there is no silent skip or
+automatic destructive cleanup. Interrupted `running` audit records are reconciled
+as failed when the next invocation acquires that source's lock.
+
+Each processing transaction claims one item with `FOR UPDATE SKIP LOCKED`.
+An item failure rolls back its derived changes and marks it failed with only an
+error category. Other items continue. Failed processing rows are not retried
+automatically; after correcting the cause, explicitly reset selected rows to
+`pending` through reviewed database maintenance. Existing occurrence uniqueness
+makes such reprocessing safe.
+
+Text deduplication uses a transaction advisory lock around candidate lookup and
+canonical-lead insertion. This serializes the decision step to prevent races even
+when no matching row exists yet. Candidate claims remain independent. This is a
+correctness-first tradeoff for the single-service MVP, not a high-throughput queue.
+
+## Exact and fuzzy matching
+
+1. The source/external-ID database constraint prevents duplicate raw insertion.
+2. An existing occurrence or canonical URL identifies the same lead.
+3. Text matching considers matching intent/subject within the configured publication
+   window (collection time is the fallback), initially 30 days in either direction.
+   Exact fingerprints match before fuzzy comparison.
+4. Fuzzy candidates are narrowed by grade and meaningful token anchors, then scored
+   with token-set Jaccard similarity: `100 * intersection / union`. The default
+   threshold is 90. Both texts need at least five meaningful tokens.
+5. Conflicting known grades, goals, online/offline formats, labeled locations,
+   budgets, or phone-contact signatures block text-based merging. Unknown fields
+   do not manufacture a conflict. Borderline scores stay separate.
+
+Every accepted occurrence retains its original raw record and URL. An explicit
+source identity or URL match takes precedence over text differences, allowing
+edits/reposts to retain a common canonical identity. Matching is deliberately
+conservative: there is no stemming or synonym model, and fuzzy matching is
+restricted to recent candidates.
 
 ## Configuration
 
-Settings use typed defaults plus the version-controlled YAML files below. Process
-environment values override `.env` for deployment settings; explicit `Settings`
-constructor values override both in tests. The current CLI's `--source` selects
-one configured fixture source. Business rules are changed in YAML, rather than
-through hidden environment overrides.
+Environment values override `.env`; explicit settings constructor values override
+both in tests. All non-secret business settings are version-controlled YAML.
 
 | File / variable | Purpose |
 |---|---|
-| `config/business.yml` | Timezone (initially UTC), local digest time, retention, deduplication defaults |
-| `config/scoring.yml` | Versioned weights and ordered notification thresholds |
-| `config/queries.yml` | Provider-neutral query groups for later collectors |
-| `config/sources.yml` | Active registry; only the synthetic fixture is enabled |
-| `config/sources.example.yml` | Disabled future source reference; never loaded automatically |
-| `DATABASE_URL` | Required PostgreSQL URL using `postgresql+psycopg://` |
-| `CONFIG_DIR` | YAML directory; defaults to `config` |
-| `LOG_LEVEL` | DEBUG, INFO, WARNING, or ERROR; defaults to INFO |
-| `HEALTH_INTERVAL_SECONDS` | Positive foundation health polling interval; defaults to 30 |
+| `config/processing.yml` | Classifier version, regex rules, priorities, confidence, boilerplate |
+| `config/scoring.yml` | Score version, weights, thresholds, freshness/stale periods |
+| `config/business.yml` | Timezone, future digest preferences, retention, deduplication |
+| `config/sources.yml` | Enabled synthetic sources and required operations policy |
+| `config/sources.example.yml` | Disabled future-source reference, not automatically loaded |
+| `config/queries.yml` | Provider-neutral query groups for future collectors |
+| `DATABASE_URL` | Required `postgresql+psycopg://` URL |
+| `CONFIG_DIR` | YAML directory, defaults to `config` |
+| `LOG_LEVEL` | DEBUG, INFO, WARNING, ERROR; defaults to INFO |
+| `HEALTH_INTERVAL_SECONDS` | Foundation health polling interval, defaults to 30 |
 
-Validation rejects unknown YAML fields, duplicate source keys, invalid timezones,
-nonpositive retention/intervals, overlapping thresholds, unapproved enabled
-sources, and every enabled real source. Do not put secrets into source options,
-policy notes, or metadata. Future registry entries reference credentials by
-environment-variable name only. Telegram token/allowlist validation must be added
-with delivery in Milestone 3; neither is needed by the fixture foundation.
+Validation rejects unknown YAML fields, duplicate source/rule IDs, invalid regexes,
+invalid timezones, nonpositive intervals, overlapping score bands, unapproved
+enabled sources, and every enabled real source. Never place secrets in YAML or
+metadata. Telegram secrets and allowlist validation belong to Milestone 3.
 
-The version 0.2 source-registry contract requires an `operations` block for every
-source, including disabled entries. `freshness_sla_seconds` and
-`pause_after_consecutive_failures` must be positive integers; `quota_policy` must
-be a non-empty description of the source's quota policy. The optional
-`authorization_expires_at` defaults to null. When supplied, it must include a
-timezone (for example, `"2026-12-01T12:00:00+02:00"`) and is normalized to UTC.
-Naive timestamps are rejected. Collection intervals must also remain positive.
-These settings are validated and stored with the source's existing JSONB
-configuration; no schema migration is needed. Freshness monitoring, automatic
-pausing, quota enforcement, and expiry monitoring remain future runtime behavior.
+Every source requires `operations`: positive `freshness_sla_seconds` and
+`pause_after_consecutive_failures`, a non-empty `quota_policy`, and optional
+`authorization_expires_at`. Expiry must be timezone-aware and is normalized to UTC;
+expired authorizations and stored pauses block collection. Failure counters and
+last-success times persist. Automated freshness/quota monitoring, threshold-based
+pausing, and operational alerts are not implemented yet.
 
-`sync-sources` explicitly upserts registry entries and initializes their cursors;
-it does not remove historical sources omitted from the YAML. Disable an existing
-entry explicitly before removing it. Collection orchestration must honor both
-registry and operational pause state when implemented.
+`sync-sources` is an explicit registry upsert and initializes missing cursors.
+It can apply a reviewed re-enablement; ordinary collection honors existing stored
+disabled/paused state. Omitted YAML entries are not deleted from history.
+Disable an entry explicitly before removing it. Logs emit event names, internal
+IDs, counts, and safe categories, never post bodies or arbitrary exception text.
 
-Logs contain event names and selected operational fields. The CLI reports safe
-error categories without echoing configuration values, SQL parameters, exception
-messages, or post bodies. For a configuration error, inspect the corresponding
-local settings against their typed definitions in `src/tutor_lead_monitor/config.py`.
-
-## Database and migrations
+## Retention
 
 ```sh
-uv run tutor-lead-monitor migrate
-uv run alembic current
-uv run alembic check
-uv run alembic upgrade head --sql
-# After an intentional ORM schema change:
-uv run alembic revision --autogenerate -m "Describe the schema change"
+uv run tutor-lead-monitor retention --dry-run
+# Review counts, then explicitly request deletion:
+uv run tutor-lead-monitor retention --apply
 ```
 
-Review generated migrations before applying them. `migrate` is the normal safe
-startup wrapper; direct Alembic commands are development tools. To reverse the
-initial migration on a disposable database, use `uv run alembic downgrade base`;
-this drops the application tables and their data.
+Dry run is the default and reports the same selection counts without deleting.
+Defaults: rejected raw records 30 days, leads/occurrences 90 days since last seen,
+terminal notifications and finished collection-run metrics 180 days. Cutoffs are
+strictly older-than; boundary records remain. Source retention can shorten the
+period for unreferenced processed/rejected raw records.
 
-Revision `0001` creates `sources`, `collector_states`, `collection_runs`,
-`raw_items`, `leads`, `lead_occurrences`, `notifications`, `notification_items`,
-and `feedback`. UUIDs are generated by the application; timestamps use PostgreSQL
-`timestamptz` and connections select UTC. Raw fingerprints remain NULL until
-Milestone 2 normalization. Leads refer to raw evidence; their ID is the canonical
-duplicate-group identity.
+Deletion is explicit and ordered: notification membership, expired terminal
+notifications, occurrences, leads, unreferenced raw items, finished runs. Feedback
+is never deleted. Feedback-linked leads and their raw evidence remain, as do leads
+referenced by retained notifications. Pending/sending notifications, pending/failed
+raw items, active runs, sources, and cursors remain for diagnosis or future work.
+Dependencies can therefore extend retention beyond its nominal period.
 
-Raw `(source_id, external_id)` uniqueness prevents repeat insertion and preserves
-the first collected evidence. `persist_page` inserts a page and advances its
-cursor in one caller-owned transaction, using a savepoint for page rollback.
-It does not implement normalization or cross-source deduplication. Callers must
-serialize collection per source before using it in concurrent jobs.
+Retention holds an exclusive maintenance advisory lock; collection pages and
+processing transactions take its shared counterpart. Future notification/feedback
+writers must use the same gate. No broad cascade deletion is used.
 
-Immediate notifications are unique per lead/recipient/kind. Digest envelopes are
-unique per recipient/kind/local-date period and have separate membership rows.
-Foreign keys prevent accidental evidence or feedback deletion. The Milestone 2
-retention task must explicitly handle dependent records and preserve feedback
-until manual deletion; no broad delete cascades silently erase it.
+## Containers, migrations, and CI
 
-## Tests and development checks
+```sh
+docker compose up --build -d --wait
+docker compose exec app tutor-lead-monitor pipeline --as-of 2026-01-01T13:00:00Z
+docker compose logs --tail=50 app migrate
+docker compose down
+```
+
+The application runs as a non-root OS user. A one-shot migration service succeeds
+before it starts. `serve` only maintains the health-reporting lifecycle and exits
+cleanly on SIGINT/SIGTERM. Business commands remain explicit. Named volumes survive
+`down`; `down --volumes` deliberately destroys local data. This is not a production
+deployment; restart policies, backups/restores and unattended tests remain later work.
+
+```sh
+uv run alembic upgrade head
+uv run alembic check
+uv run alembic upgrade head --sql
+# Only on a disposable database: downgrade drops all application tables/data.
+uv run alembic downgrade base
+uv run alembic upgrade head
+```
+
+Review any future generated migration before applying it. Use
+`uv run tutor-lead-monitor migrate` as the normal sanitized startup wrapper.
 
 ```sh
 uv run pytest tests/unit
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+# With Compose PostgreSQL running, create a dedicated test database once:
+docker compose exec postgres createdb -U postgres -O tutor_app tutor_lead_monitor_test
+export TEST_DATABASE_URL='postgresql+psycopg://tutor_app:REPLACE_WITH_LOCAL_APP_PASSWORD@localhost:5432/tutor_lead_monitor_test'
+uv run pytest tests/unit tests/integration
 ```
 
-Integration tests use actual PostgreSQL and Alembic, never SQLite or `create_all`.
-Use a dedicated disposable database with a name ending in `_test`. Its schema is
-reset between tests. `TEST_DATABASE_URL` must be in the process environment;
-integration tests skip with an explicit reason when it is absent.
+Integration tests reset a disposable database whose name must end in `_test`.
+They use PostgreSQL/Alembic, not SQLite or `create_all`. Never run parallel test
+workers against the same test schema. Without `TEST_DATABASE_URL`, local database
+tests explicitly skip; in CI or with `REQUIRE_INTEGRATION_TESTS=1`, missing database
+configuration fails the suite.
 
-With the local Compose PostgreSQL already started, create the test database once:
+`.github/workflows/ci.yml` runs Python 3.12 with a PostgreSQL 17 service, locked uv
+installation, unit/integration tests, lint, formatting, strict mypy, migration
+upgrade/downgrade, and Alembic consistency. Integration tests additionally compare
+ORM metadata to the migrated schema. Validate workflow syntax locally with:
 
 ```sh
-docker compose exec postgres createdb -U postgres -O tutor_app tutor_lead_monitor_test
-# Substitute the same local application password and your published port:
-export TEST_DATABASE_URL='postgresql+psycopg://tutor_app:REPLACE_WITH_LOCAL_APP_PASSWORD@localhost:5432/tutor_lead_monitor_test'
-uv run pytest
+docker run --rm -i rhysd/actionlint:latest - < .github/workflows/ci.yml
 ```
 
-Tests cover deterministic pagination/resumption, configuration and secret
-redaction, UTC conversion, migration round trips and ORM drift, atomic raw-page
-persistence/rollback, idempotent raw insertion, source policy checks, lead bounds,
-notification uniqueness, and evidence/feedback foreign keys. No test calls a real
-collector or delivery service. Do not run parallel integration workers against
-the same test database.
+`uv.lock` continues to pin the existing dependencies; Milestone 2 adds no new
+runtime library. Update dependencies deliberately with `uv lock --upgrade` and
+rerun all checks. The Docker image installs the locked runtime subset.
 
-`uv.lock` pins resolved runtime and development versions with hashes. To update
-dependencies deliberately: `uv lock --upgrade`, `uv sync --locked`, then rerun the
-checks and database suite. The Docker image installs the locked runtime subset.
+## Before Milestone 3
 
-## Before Milestone 2
-
-No external provider decision or credential blocks pipeline implementation.
-Use anonymized positive, offering, vacancy, indirect, and cross-post examples to
-expand the fixture corpus. Keep score/retention/deduplication defaults until
-evidence supports changes. Define per-item failure/retry behavior, per-source
-locking and checkpoint orchestration, and dependency-aware retention as part of
-Milestone 2. Choose the user's timezone and digest preferences before delivery;
-UTC/19:00 are provisional. Real-source review and production host decisions remain
-in their later milestones.
+Expand the anonymized corpus and review false positives/false merges before real
+source enablement. Rules are heuristic; evidence spans refer to normalized text,
+location extraction requires explicit labels, and similarity is lexical.
+Feedback-protected evidence and unresolved failed/pending work need manual review.
+Choose the Telegram owner allowlist, timezone/digest time, and final delivery
+thresholds; then implement delivery and notification retries against fake clients
+first. No Telegram messages or real-source requests have been made by this pipeline.

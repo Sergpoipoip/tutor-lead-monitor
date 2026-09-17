@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from tutor_lead_monitor.collectors.base import Collector
-from tutor_lead_monitor.collectors.fixture import FIXTURE_TIME, FixtureCollector
+from tutor_lead_monitor.collectors.fixture import FIXTURE_TIME, TEXTS, FixtureCollector
 from tutor_lead_monitor.domain.models import CollectionContext
 
 
@@ -14,9 +14,9 @@ async def test_fixture_is_deterministic_and_resumable() -> None:
     pages = [page async for page in collector.collect(context)]
     repeated = [page async for page in collector.collect(replace(context, run_id="run-b"))]
     assert pages == repeated
-    assert [len(page.items) for page in pages] == [2, 2]
-    assert [page.has_more for page in pages] == [True, False]
-    assert len({item.external_id for page in pages for item in page.items}) == 4
+    assert [len(page.items) for page in pages] == [2] * 6 + [1]
+    assert [page.has_more for page in pages] == [True] * 6 + [False]
+    assert len({item.external_id for page in pages for item in page.items}) == len(TEXTS)
     resumed = [
         page async for page in collector.collect(replace(context, cursor=pages[0].next_cursor))
     ]
@@ -32,10 +32,10 @@ async def test_since_can_yield_successful_empty_pages() -> None:
         async for page in FixtureCollector().collect(CollectionContext(FIXTURE_TIME, None, "empty"))
     ]
     assert pages and all(not page.items for page in pages)
-    assert pages[-1].next_cursor == {"version": 1, "offset": 4}
+    assert pages[-1].next_cursor == {"version": 1, "offset": len(TEXTS)}
 
 
-@pytest.mark.parametrize("offset", [-1, 5, "2", True])
+@pytest.mark.parametrize("offset", [-1, len(TEXTS) + 1, "2", True])
 async def test_invalid_cursor(offset: int | str | bool) -> None:
     with pytest.raises(ValueError):
         _ = [
