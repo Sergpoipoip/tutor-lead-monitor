@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import SecretStr, ValidationError
 
 from tutor_lead_monitor.config import (
@@ -9,6 +11,7 @@ from tutor_lead_monitor.config import (
     RetentionConfig,
     Settings,
     SourceConfig,
+    SourceOperations,
     SourceRegistry,
     Thresholds,
     load_config,
@@ -90,3 +93,89 @@ def test_yaml_failure_is_sanitized(tmp_path: Path) -> None:
         load_config(tmp_path)
     assert "synthetic-sentinel" not in str(error.value)
     assert "business.yml" in str(error.value)
+
+
+@pytest.mark.parametrize("filename", ["sources.yml", "sources.example.yml"])
+def test_registry_operations_configuration(filename: str) -> None:
+    registry = SourceRegistry.model_validate(
+        yaml.safe_load((Path("config") / filename).read_text(encoding="utf-8"))
+    )
+    operations = registry.sources[0].operations
+    assert isinstance(operations, SourceOperations)
+    assert operations.freshness_sla_seconds == 900
+    assert operations.pause_after_consecutive_failures == 5
+    assert operations.quota_policy.strip()
+    assert operations.authorization_expires_at is None
+
+
+def test_source_requires_operations(source_config: SourceConfig) -> None:
+    data = source_config.model_dump()
+    del data["operations"]
+    with pytest.raises(ValidationError, match="operations"):
+        SourceConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("field", ["freshness_sla_seconds", "pause_after_consecutive_failures"])
+@pytest.mark.parametrize("value", [0, -1, 1.5])
+def test_invalid_operations_thresholds(
+    source_config: SourceConfig, field: str, value: int | float
+) -> None:
+    data = source_config.model_dump()
+    data["operations"][field] = value
+    with pytest.raises(ValidationError, match=field):
+        SourceConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_invalid_collection_interval(source_config: SourceConfig, value: int) -> None:
+    data = source_config.model_dump()
+    data["collector_interval_seconds"] = value
+    with pytest.raises(ValidationError, match="collector_interval_seconds"):
+        SourceConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("policy", ["", "   "])
+def test_empty_quota_policy(source_config: SourceConfig, policy: str) -> None:
+    data = source_config.operations.model_dump()
+    data["quota_policy"] = policy
+    with pytest.raises(ValidationError, match="quota_policy"):
+        SourceOperations.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "expiry",
+    [
+        "2026-12-01T12:00:00+02:00",
+        "2026-12-01T05:00:00-05:00",
+        "2026-12-01T10:00:00Z",
+        datetime.fromisoformat("2026-12-01T12:00:00+02:00"),
+    ],
+)
+def test_authorization_expiry_normalized_to_utc(
+    source_config: SourceConfig, expiry: str | datetime
+) -> None:
+    data = source_config.model_dump()
+    data["operations"]["authorization_expires_at"] = expiry
+    source = SourceConfig.model_validate(data)
+    normalized = source.operations.authorization_expires_at
+    assert normalized == datetime(2026, 12, 1, 10, tzinfo=UTC)
+    assert normalized.tzinfo is UTC
+    serialized = source.model_dump(mode="json")["operations"]
+    assert serialized["authorization_expires_at"] == "2026-12-01T10:00:00Z"
+
+
+@pytest.mark.parametrize("expiry", ["2026-12-01T12:00:00", datetime(2026, 12, 1, 12)])
+def test_naive_authorization_expiry_rejected(
+    source_config: SourceConfig, expiry: str | datetime
+) -> None:
+    data = source_config.operations.model_dump()
+    data["authorization_expires_at"] = expiry
+    with pytest.raises(ValidationError, match="Timezone-aware"):
+        SourceOperations.model_validate(data)
+
+
+def test_optional_authorization_expiry_defaults_to_none() -> None:
+    operations = SourceOperations(
+        freshness_sla_seconds=1, pause_after_consecutive_failures=1, quota_policy="Local only"
+    )
+    assert operations.authorization_expires_at is None

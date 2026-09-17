@@ -1,7 +1,7 @@
 # Tutor Lead Monitor — Source Strategy and Registry Guide
 
 Status: implementation-ready draft  
-Version: 0.1  
+Version: 0.2  
 Last updated: 2026-09-17
 
 ## 1. Purpose
@@ -48,6 +48,11 @@ sources:
     access_method: authorized_bot
     collector_interval_seconds: 300
     credential_env: TELEGRAM_BOT_TOKEN
+    operations:
+      freshness_sla_seconds: 900
+      pause_after_consecutive_failures: 5
+      quota_policy: "provider-specific"
+      authorization_expires_at: null
     config:
       allowed_chat_ids: []
     policy:
@@ -67,8 +72,11 @@ Required fields:
 - `policy_status`
 - `access_method`
 - schedule or collection interval
+- freshness service-level target for successful collection
+- automatic pause threshold and quota policy
 - non-secret collector configuration
 - authorization/policy notes
+- authorization expiry or review date when applicable
 - retention period
 
 An enabled source with `policy_status != approved` must fail configuration validation.
@@ -396,7 +404,41 @@ Track per source and query group:
 
 After at least 30–50 reviewed candidates per source, use these metrics to increase/decrease polling frequency or disable low-value queries. The goal is useful leads, not maximum collection volume.
 
-## 13. Source onboarding checklist
+## 13. Autonomous production behavior
+
+Every enabled real source must remain safe and diagnosable when the application runs unattended.
+
+### 13.1 Persistent state
+
+- Store cursors, high-water marks, backoff state, consecutive failure counts, and last successful run in PostgreSQL.
+- Advance a cursor only after the corresponding items are persisted successfully.
+- A restart must not force a full historical recrawl or skip items collected before the cursor commit.
+- Source configuration and query versions should be visible in collection-run metadata.
+
+### 13.2 Failure and pause policy
+
+- Classify failures as temporary network, rate limit, quota exhausted, authorization, policy/access, parsing/schema change, or permanent configuration errors.
+- Retry temporary failures with bounded exponential backoff and jitter.
+- Honor provider retry headers and explicit rate limits.
+- Automatically pause a source after the configured number of consecutive authorization, policy, or parsing failures.
+- Do not silently fall back from an official API to browser automation or scraping.
+- One paused or failing source must not stop other collectors, processing, immediate alerts, or the daily digest.
+- `/status` must show why a source is paused and the last successful run.
+
+### 13.3 Freshness, quota, and credential monitoring
+
+- Define a freshness window for every enabled source based on its schedule.
+- Mark a source stale when no successful run occurs within that window, even if the process itself is healthy.
+- Track requests and known quota consumption where the provider exposes it.
+- Slow or pause collection before exceeding a hard quota; never create an uncontrolled retry loop.
+- Record credential or authorization expiration dates when known and surface them before expiry.
+- Treat zero results as a successful run only when the provider request and parsing completed normally.
+
+### 13.4 Safe re-enablement
+
+Re-enabling a paused source requires a controlled dry run, review of sample results, confirmation that cursors and rate limits are correct, and an explicit configuration change. Automatic recovery may clear short-lived network/rate-limit pauses, but it must not clear policy or authorization pauses without review.
+
+## 14. Source onboarding checklist
 
 Before enabling any real source:
 
@@ -410,10 +452,13 @@ Before enabling any real source:
 8. Define which fields are retained and for how long.
 9. Add redacted fixtures and contract tests.
 10. Test duplicate, edited, deleted, empty, and rate-limited responses.
-11. Start disabled, run a controlled dry run, inspect results, then explicitly enable.
-12. Set a review date and owner.
+11. Test restart behavior, cursor recovery, bounded retries, and automatic pause behavior.
+12. Define freshness, quota, authorization-expiry, and consecutive-failure thresholds.
+13. Confirm `/status` and logs make stale or paused state understandable without exposing credentials or unnecessary personal data.
+14. Start disabled, run a controlled dry run, inspect results, then explicitly enable.
+15. Set a review date and owner.
 
-## 14. First manual setup tasks for the project owner
+## 15. First manual setup tasks for the project owner
 
 These tasks can proceed while Milestones 1–3 are being coded:
 
@@ -426,7 +471,7 @@ These tasks can proceed while Milestones 1–3 are being coded:
 7. Choose one search provider only after confirming current access, quota, and pricing.
 8. Do not place any production token, cookie, or personal-session file in the repository.
 
-## 15. Official documentation starting points
+## 16. Official documentation starting points
 
 - Telegram Bot API: <https://core.telegram.org/bots/api>
 - Telegram Bot FAQ: <https://core.telegram.org/bots/faq>

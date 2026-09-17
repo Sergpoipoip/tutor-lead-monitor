@@ -7,6 +7,11 @@ sources:
     policy_status: approved
     access_method: fixture
     collector_interval_seconds: 300
+    operations:
+      freshness_sla_seconds: 900
+      pause_after_consecutive_failures: 5
+      quota_policy: Local fixture; no provider quota
+      authorization_expires_at: null
     config:
       page_size: 2
     policy:

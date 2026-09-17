@@ -9,6 +9,11 @@ sources:
     access_method: authorized_bot
     collector_interval_seconds: 300
     credential_env: TELEGRAM_BOT_TOKEN
+    operations:
+      freshness_sla_seconds: 900
+      pause_after_consecutive_failures: 5
+      quota_policy: provider-specific
+      authorization_expires_at: null
     config:
       allowed_chat_ids: []
     policy:

@@ -106,6 +106,17 @@ policy notes, or metadata. Future registry entries reference credentials by
 environment-variable name only. Telegram token/allowlist validation must be added
 with delivery in Milestone 3; neither is needed by the fixture foundation.
 
+The version 0.2 source-registry contract requires an `operations` block for every
+source, including disabled entries. `freshness_sla_seconds` and
+`pause_after_consecutive_failures` must be positive integers; `quota_policy` must
+be a non-empty description of the source's quota policy. The optional
+`authorization_expires_at` defaults to null. When supplied, it must include a
+timezone (for example, `"2026-12-01T12:00:00+02:00"`) and is normalized to UTC.
+Naive timestamps are rejected. Collection intervals must also remain positive.
+These settings are validated and stored with the source's existing JSONB
+configuration; no schema migration is needed. Freshness monitoring, automatic
+pausing, quota enforcement, and expiry monitoring remain future runtime behavior.
+
 `sync-sources` explicitly upserts registry entries and initializes their cursors;
 it does not remove historical sources omitted from the YAML. Disable an existing
 entry explicitly before removing it. Collection orchestration must honor both

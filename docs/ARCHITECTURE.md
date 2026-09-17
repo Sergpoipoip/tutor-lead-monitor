@@ -1,7 +1,7 @@
 # Tutor Lead Monitor — Technical Architecture
 
 Status: implementation-ready draft  
-Version: 0.1  
+Version: 0.2  
 Last updated: 2026-09-17
 
 ## 1. Architectural principles
@@ -42,13 +42,39 @@ The scheduler invokes application use cases. It must not contain business logic.
 
 ## 3. Deployment model
 
-MVP Docker Compose services:
+Local development and the first production deployment use the same container images and database migrations. Environment-specific configuration must remain outside the images.
+
+Core Docker Compose services:
 
 - `app`: Python application running scheduled collection/processing/delivery jobs and the Telegram bot;
 - `postgres`: PostgreSQL database;
 - optional `migrate` one-shot service or startup command for Alembic migrations.
 
 Do not introduce a broker in the MVP. Use explicit database transactions and job locks. If volume later requires multiple workers, the use-case boundaries should be transferable to a queue without rewriting collectors or domain logic.
+
+### 3.1 Local development
+
+- expose PostgreSQL only when needed for local debugging;
+- use bind mounts or rebuildable development images;
+- allow manual `docker compose up` and fixture collectors;
+- do not use production credentials or production data.
+
+### 3.2 Production deployment
+
+Production must run on an always-on host and require no daily manual command.
+
+- Long-running services use `restart: unless-stopped` or an equivalent host-level restart policy.
+- PostgreSQL uses a named persistent volume and is not exposed publicly.
+- The application waits for a healthy database before starting normal jobs.
+- Health checks distinguish process liveness from readiness to collect and deliver notifications.
+- Only one scheduler instance may own each scheduled job; PostgreSQL advisory locks or a lock table prevent duplicate runs after restarts or overlapping schedules.
+- Deployment secrets come from protected environment variables or a platform secret store, never Git or container images.
+- Host firewall and remote access expose only the minimum required ports. Telegram long polling requires no public application port; webhooks, if later selected, require TLS and a separately reviewed ingress configuration.
+- The host must use reliable time synchronization. All application timestamps remain UTC, with digest scheduling converted from the configured user timezone.
+- Database backups must leave the application volume/host or use provider-managed snapshots; a backup stored only beside the database is insufficient.
+- Production deploy, update, rollback, restart, backup, and restore commands belong in a concise runbook.
+
+The initial production topology may remain a single host. High availability is not an MVP requirement; automatic restart, recoverable data, and visible failure are required.
 
 ## 4. Suggested repository layout
 
@@ -437,6 +463,15 @@ Suggested defaults:
 
 Use PostgreSQL advisory locks or a lock table so duplicate application processes cannot run the same scheduled job simultaneously.
 
+Scheduler recovery rules:
+
+- startup reconciles unfinished collection runs and notifications left in `running` or `sending` states;
+- every job defines a misfire policy instead of assuming the process was continuously available;
+- a missed collector run should normally execute once after recovery, not replay every missed interval;
+- a missed daily digest may run within a configurable grace window and must not send twice for the same local date;
+- backoff state and collector cursors live in PostgreSQL, not only in process memory;
+- graceful shutdown stops accepting new jobs and gives in-flight database transactions a bounded time to finish.
+
 ## 11. Telegram boundary
 
 Define an internal notifier interface:
@@ -494,6 +529,16 @@ Minimum `/status` output:
 - pending/failed notification counts;
 - paused state and next digest time.
 
+Production must also make the following conditions visible through logs, `/status`, or host-level alerts:
+
+- an enabled source has not succeeded within its configured freshness window;
+- repeated authorization, quota, or policy failures automatically paused a source;
+- pending/failed processing or notification counts exceed configured limits;
+- the daily digest did not complete within its grace window;
+- the most recent database backup is missing or too old;
+- disk space or database volume usage crosses warning thresholds;
+- the application or database health check remains unhealthy after restart attempts.
+
 ## 14. Testing strategy
 
 ### Unit tests
@@ -517,6 +562,17 @@ Minimum `/status` output:
 - feedback authorization and persistence;
 - retention cleanup.
 
+### Production verification
+
+- deploy from a clean checkout using production documentation;
+- reboot the host and verify automatic service startup;
+- verify scheduler ownership prevents duplicate work after restart;
+- inject a controlled high-scoring lead and receive exactly one immediate alert;
+- generate one controlled daily digest at the configured local time;
+- simulate a temporary source failure and verify later recovery without blocking other sources;
+- create a PostgreSQL backup and restore it into an isolated database;
+- complete a minimum 24-hour unattended smoke test.
+
 ### Contract tests
 
 Each real collector should convert recorded, redacted provider fixtures into `CollectedItem` objects. Do not make live third-party requests in the default test suite.
@@ -534,7 +590,23 @@ Each real collector should convert recorded, redacted provider fixtures into `Co
 - Dependency versions are constrained and checked.
 - No headless browser, account cookies, or personal Telegram session is introduced without a separate reviewed design.
 
-## 16. Evolution path
+## 16. Backup, restore, and operational runbook
+
+The production design must document and test:
+
+- backup mechanism, schedule, encryption, destination, retention, and ownership;
+- a default backup frequency of at least once per day, refined after the actual acceptable data-loss window is chosen;
+- periodic cleanup that cannot delete the newest valid backup;
+- restoration into an isolated database before any production replacement;
+- migration compatibility between application and database versions;
+- pre-update backup and a rollback path for both application image and schema;
+- emergency source disablement without redeploying the entire application;
+- recovery steps for expired credentials, exhausted quotas, corrupted configuration, unavailable PostgreSQL, and a full disk;
+- the expected recovery point objective (RPO) and recovery time objective (RTO) once a host/provider is selected.
+
+A backup job is not considered complete until at least one restore test has succeeded. Restore tests should be repeated after material database or deployment changes.
+
+## 17. Evolution path
 
 Only after the MVP has real volume and measurements, consider:
 

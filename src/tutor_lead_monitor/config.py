@@ -127,6 +127,18 @@ class SourcePolicy(StrictModel):
         return utc(value) if value is not None else None
 
 
+class SourceOperations(StrictModel):
+    freshness_sla_seconds: PositiveInt
+    pause_after_consecutive_failures: PositiveInt
+    quota_policy: str = Field(min_length=1, pattern=r"\S")
+    authorization_expires_at: datetime | None = None
+
+    @field_validator("authorization_expires_at")
+    @classmethod
+    def utc_authorization_expiry(cls, value: datetime | None) -> datetime | None:
+        return utc(value) if value is not None else None
+
+
 class SourceConfig(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     kind: str = Field(min_length=1)
@@ -139,6 +151,7 @@ class SourceConfig(StrictModel):
     ]
     collector_interval_seconds: PositiveInt
     credential_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
+    operations: SourceOperations
     config: dict[str, JSONValue] = Field(default_factory=dict)
     policy: SourcePolicy
     retention_days: PositiveInt = 90

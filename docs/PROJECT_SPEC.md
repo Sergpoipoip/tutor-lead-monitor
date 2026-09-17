@@ -1,7 +1,7 @@
 # Tutor Lead Monitor — Product Specification
 
 Status: implementation-ready draft  
-Version: 0.1  
+Version: 0.2  
 Last updated: 2026-09-17
 
 ## 1. Product summary
