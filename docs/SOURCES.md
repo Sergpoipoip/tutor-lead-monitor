@@ -480,3 +480,128 @@ These tasks can proceed while Milestones 1–3 are being coded:
 - Yandex developer/cloud documentation: <https://yandex.cloud/en/docs/>
 
 These links are starting points. Verify the exact API product and method documentation during the corresponding milestone.
+
+## 17. Milestone 4A — Yandex Search API review and owner enablement
+
+Technical review date: **2026-09-18**. This records a documentation review, not
+owner approval or a live API test. The committed source remains disabled/pending.
+Yandex was selected for its official Russian web-search API, region/date controls,
+and bounded per-request billing. There is no browser scraping, smart-snippet or
+LLM integration. Searches for VK, Telegram, or Avito links use the same search API;
+they do not grant access to those platforms or permission to crawl destinations.
+
+Reviewed official sources:
+
+- [Service and access model](https://aistudio.yandex.ru/en/docs/search-api/concepts/).
+- [Account, billing, folder and API-key setup](https://aistudio.yandex.ru/en/docs/search-api/quickstart/).
+- [Synchronous operation](https://aistudio.yandex.ru/en/docs/search-api/operations/web-search-sync).
+- [REST request schema](https://aistudio.yandex.ru/en/docs/search-api/api-ref/WebSearch/search).
+- [Authentication and folder roles](https://aistudio.yandex.ru/en/docs/search-api/api-ref/authentication).
+- [Limits and quotas](https://aistudio.yandex.ru/en/docs/search-api/concepts/limits).
+- [Pricing](https://aistudio.yandex.ru/en/docs/search-api/pricing).
+- [Request-data logging opt-out](https://aistudio.yandex.ru/en/docs/ai-studio/operations/disable-logging).
+- [Optional search-result fields](https://aistudio.yandex.ru/en/docs/search-api/concepts/web-search).
+- [XML error codes](https://aistudio.yandex.ru/en/docs/search-api/reference/error-codes).
+
+The request is `POST https://searchapi.api.cloud.yandex.net/v2/web/search`, with
+`Authorization: Api-Key ...`, `folderId`, `responseFormat: FORMAT_XML`, and
+`x-data-logging-enabled: false`. Credentials and the folder ID are only read from
+protected environment settings. No smart-snippet header is sent. The logging
+opt-out is sent on every request; it is not permission to retain third-party content
+locally. The owner must still review applicable service terms and result-retention
+rights. Provider fields can be missing or change without notice.
+
+The reviewed REST schema specifies `period: PERIOD_2_WEEKS`; the conceptual guide
+also describes `resultsWithin` with different enum names. This implementation follows
+the REST schema, not the alternate conceptual spelling. The owner's first live
+smoke test must confirm this contract against their account; never silently remove
+the date filter or fall back to scraping if it fails.
+
+Default request policy:
+
+- Russian search and localization, region 225, strict family filter, typo correction
+  off, update-time descending sort, flat groups with one document per group.
+- Ten results per query by default (configurable 1–20), page zero only, up to five
+  passages. Two-week search window. No inferred publication dates from this window.
+- Three selected queries per run; configurable hard cap 1–10 requests. Selected
+  query count must fit the cap; no silent truncation of a selected query set.
+- The ten executable queries live under `searches` in `config/queries.yml`, with
+  stable IDs and provider-neutral group IDs. Rendered strings must be nonempty,
+  single-line, at most 400 characters and 40 whitespace-separated words.
+- One request per selected query, sequentially, with no automatic retries or page
+  advancement. Repeated explicit runs replay the same top pages, deduplicating by
+  SHA-256 canonical-URL external ID and the source/external-ID database constraint.
+- Stop on the first provider failure; completed pages remain committed. Replays may
+  repeat paid requests. A valid `Retry-After` of 0–300 seconds (seconds or HTTP date)
+  sets a stored source pause after rate-limit/server failure. Longer/invalid delays
+  require manual quota review; there is no automatic retry or scheduler.
+
+At review, the published synchronous quotas were 10 requests/second and 10,000/hour;
+query length was limited to 400 characters/40 words. Account quotas may differ.
+The pricing page showed approximately **USD 4 per 1,000 daytime synchronous requests**
+and **USD 3 per 1,000 night-time requests**, before VAT for the relevant contracting
+entities. It distinguishes currencies/contracts and gives reduced night rates for
+00:00–07:59:59 UTC+3. Thus three ordinary daytime requests are roughly USD 0.012 at
+that reviewed rate. These are dated observations, not permanent price guarantees.
+Recheck the actual billing-account currency, taxes, prices, quotas and budget before
+each enablement. Requests returning no useful leads can still incur costs.
+
+Only result URL, title and passages become evidence. Original URL is retained;
+identity canonicalization strips fragments and recognized tracking keys, preserving
+other query parameters, their order and encoding (including `ref`). Private/local
+literal URLs and unusable links are ignored, without DNS lookups or destination
+requests. Up to 4,096 characters of title/passages are retained, with bounded
+query-group/rank/domain/provider/snippet metadata. No raw response or query text is
+stored as provider metadata. The text is a **search-result snippet, not the complete
+original post**, and new Telegram cards label it in Russian.
+
+Publication time is optional: only explicit `published-at` or `pubDate` metadata
+with a parseable timezone is accepted, then normalized to UTC. Those fields are
+not guaranteed by the reviewed XML response contract; contract fixtures exercising
+them are synthetic. Missing/date-only/naive values stay unknown. `modtime`, request
+time, result rank, and dates in prose are never treated as publication time.
+Collection time is the actual UTC receipt time. This can lower freshness scores.
+
+Network limits: connect/write/pool 10 seconds, read 30 seconds, total request 45
+seconds; no redirects or environment proxies. The response is limited to 1 MiB,
+decoded XML to 512 KiB and 10,000 elements. Accept only uncompressed UTF-8 XML,
+strict Base64, no DTD/entity declarations. Unknown schemas/malformed responses fail
+with a sanitized category; XML error 15 is an empty successful result. HTTP auth,
+quota, server, transport, malformed-response and permanent-request errors remain
+distinct. No headers, response bodies, credentials, folder IDs, or queries are logged.
+
+### Owner checklist before the first real request
+
+1. Recheck the official documents above, service availability for your account,
+   applicable terms, snippet storage/retention rights, current price and quota.
+   Activate/link billing and set a spending budget in the provider console.
+2. Create an API key for a service account with `search-api.webSearch.user` on the
+   intended folder (or use AI Studio's key creation flow). Store the **secret key**
+   and folder ID as `YANDEX_SEARCH_API_KEY` and `YANDEX_SEARCH_FOLDER_ID` in ignored
+   `.env` or protected environment variables. Never place them in YAML or commands.
+3. In `config/sources.yml`, review `yandex_web_search` policy notes, retained fields,
+   retention and operations. Fill `policy.reviewer`, aware `policy.reviewed_at`, and
+   authorization expiry matching the credential/access lifetime when applicable.
+   Only the owner may set `policy_status: approved` and `enabled: true`.
+4. For a first smoke test, select only `seek_tutor`, set `max_requests_per_run: 1`
+   and a small `results_per_query` (for example 5). Run `check-config`, then
+   `sync-sources`. These commands do not call Yandex. Synchronization preserves
+   source UUID, cursor and audit history but intentionally applies reviewed registry
+   enabled/policy state. A stored active pause continues to block collection.
+5. Run `uv run tutor-lead-monitor collect --source yandex_web_search`. This is the
+   first paid/live request. Inspect sanitized counts and review stored evidence
+   privately; it does not process records or notify Telegram. Repeat once only if
+   the extra cost is acceptable to confirm zero duplicate inserts.
+6. Run `process` separately, review results, then explicitly run `notify-immediate`
+   or `send-digest` if desired. Restore the reviewed query budget after the smoke
+   test. `pipeline` subsequently includes every enabled supported source, so it
+   can incur search costs. Keep collection and delivery manually invoked.
+
+Emergency disable: set `enabled: false` (and `policy_status: paused` if review is
+needed), run `sync-sources`, and stop any in-flight collection command; revoke the
+key in the provider console if compromised. Do not delete source/evidence/audit
+records. A started HTTP request cannot be recalled. Disable before application
+rollback to Milestone 3; preserve the database and use that release's config if its
+schema rejects the new source/query settings. There is no database migration to
+reverse. Automated pausing after repeated failures, source scheduling and production
+deployment remain later work (autonomous operation is Milestone 6).

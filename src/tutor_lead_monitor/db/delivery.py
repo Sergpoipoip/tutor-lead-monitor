@@ -51,6 +51,7 @@ def view(lead: Lead, raw: RawItem, source: Source) -> LeadView:
         raw.published_at,
         raw.text,
         raw.canonical_url or raw.url,
+        raw.metadata_.get("evidence_kind") == "search_result_snippet",
     )
 
 

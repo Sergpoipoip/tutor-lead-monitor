@@ -25,6 +25,7 @@ from tutor_lead_monitor.processing.extract import extract
 from tutor_lead_monitor.processing.models import Classification, ExtractedFields, ScoreResult
 from tutor_lead_monitor.processing.normalize import canonical_url, contact_signature, normalize
 from tutor_lead_monitor.processing.score import score
+from tutor_lead_monitor.search.urls import public_url
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,11 @@ def process_item(session: Session, raw: RawItem, config: AppConfig, now: datetim
     )
     raw.normalized_text = normalized.readable
     raw.exact_fingerprint = normalized.exact_fingerprint
-    raw.canonical_url = canonical_url(raw.url)
+    raw.canonical_url = (
+        public_url(raw.url or "")
+        if raw.metadata_.get("evidence_kind") == "search_result_snippet"
+        else canonical_url(raw.url)
+    )
     metadata = dict(raw.metadata_)
     metadata["_tlm_processing"] = cast(
         JSONValue,

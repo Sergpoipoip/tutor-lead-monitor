@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yandexsearch version="1.0"><response><results><grouping>
+  <group><doc><url>https://example.invalid/request?ref=42&amp;utm_source=test#part</url>
+    <title>Ищу <hlword>репетитора</hlword> — littérature</title>
+    <passages><passage>Помочь с литературой &amp; сочинением. 😀</passage><passage>Онлайн, 10 класс.</passage></passages>
+    <published-at>2026-09-18T13:00:00+03:00</published-at>
+  </doc></group>
+  <group><doc><url>https://example.invalid/second</url><title>Нужен репетитор по литературе</title>
+    <modtime>2026-09-18T10:00:00Z</modtime>
+  </doc></group>
+  <group><doc><url>https://example.invalid/third</url><passages><passage>Только фрагмент</passage></passages>
+    <pubDate>Fri, 18 Sep 2026 13:00:00 +0300</pubDate>
+  </doc></group>
+  <group><doc><title>Нет ссылки</title></doc></group>
+  <group><doc><url>http://127.0.0.1/private</url><title>Не публичный адрес</title></doc></group>
+  <group><doc><url>https://example.invalid/no-text</url></doc></group>
+</grouping></results></response></yandexsearch>

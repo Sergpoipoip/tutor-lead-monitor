@@ -16,6 +16,7 @@ from tutor_lead_monitor.notifications.russian import (
     display_date,
 )
 from tutor_lead_monitor.processing.normalize import canonical_url
+from tutor_lead_monitor.search.urls import public_url
 
 MESSAGE_LIMIT = 3800  # Conservative UTF-16 bound, including markup/entities.
 
@@ -90,8 +91,10 @@ def lead_card(lead: LeadView, now: datetime) -> str:
     reasons = [SCORE_REASONS.get(reason, UNKNOWN_REASON) for reason in lead.reason_ids[:3]]
     parts.append(f"Почему подходит: {safe('; '.join(reasons) or 'нет данных', 240)}")
     parts.append(f"{safe(lead.source, 120)} · {age(lead.published_at, now)}")
+    if lead.is_search_snippet:
+        parts.append("Фрагмент поисковой выдачи, не полный текст объявления:")
     parts.append(safe(lead.excerpt, 700))
-    url = canonical_url(lead.url)
+    url = public_url(lead.url or "") if lead.is_search_snippet else canonical_url(lead.url)
     if url and not any(ord(c) < 32 for c in url) and units(html.escape(url)) <= 1200:
         parts.append(f'<a href="{html.escape(url, quote=True)}">Открыть оригинал</a>')
     return "\n".join(parts)

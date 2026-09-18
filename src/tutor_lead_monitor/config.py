@@ -34,6 +34,21 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_allowed_user_ids: SecretStr | None = None
     telegram_recipient_chat_id: SecretStr | None = None
+    yandex_search_api_key: SecretStr | None = Field(default=None, exclude=True)
+    # Treat the deployment-specific folder ID as sensitive too.
+    yandex_search_folder_id: SecretStr | None = Field(default=None, exclude=True)
+
+    def yandex_access(self) -> tuple[SecretStr, SecretStr]:
+        key, folder = self.yandex_search_api_key, self.yandex_search_folder_id
+        if (
+            key is None
+            or folder is None
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", key.get_secret_value())
+            or not re.fullmatch(r"[a-z0-9]{20}", folder.get_secret_value())
+            or key.get_secret_value().startswith("REPLACE_")
+        ):
+            raise ConfigError("Configure valid Yandex Search credentials")
+        return key, folder
 
     def telegram_access(self) -> tuple[str, frozenset[int], int]:
         """Validate only when Telegram is explicitly started; errors contain no inputs."""
@@ -223,7 +238,9 @@ class SourceOperations(StrictModel):
 
 class SourceConfig(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
-    kind: str = Field(min_length=1)
+    kind: Literal[
+        "fixture", "web_search", "telegram_bot_updates", "manual_import", "avito_notifications"
+    ]
     display_name: str = Field(min_length=1)
     owner: str = Field(min_length=1)
     enabled: bool = False
@@ -242,18 +259,40 @@ class SourceConfig(StrictModel):
     def enablement(self) -> Self:
         if self.enabled and self.policy_status != "approved":
             raise ValueError("Enabled sources require approved policy")
-        if self.enabled and self.kind != "fixture":
-            raise ValueError("Only fixture sources can be enabled in Milestones 1 and 2")
+        if self.enabled and self.kind not in {"fixture", "web_search"}:
+            raise ValueError("Unsupported collector kind")
         if self.kind == "fixture":
             if self.access_method != "fixture":
                 raise ValueError("Fixture source requires fixture access method")
             FixtureOptions.model_validate(self.config)
+        elif self.kind == "web_search":
+            if (
+                self.access_method != "official_api"
+                or self.credential_env != "YANDEX_SEARCH_API_KEY"
+            ):
+                raise ValueError("Yandex requires official_api and its credential environment name")
+            WebSearchOptions.model_validate(self.config)
         return self
 
 
 class FixtureOptions(StrictModel):
     page_size: PositiveInt = 2
     dataset: Literal["primary", "crosspost"] = "primary"
+
+
+class WebSearchOptions(StrictModel):
+    provider: Literal["yandex"]
+    query_ids: list[str] = Field(min_length=1, max_length=10)
+    max_requests_per_run: int = Field(default=3, ge=1, le=10, strict=True)
+    results_per_query: int = Field(default=10, ge=1, le=20, strict=True)
+
+    @model_validator(mode="after")
+    def bounded_queries(self) -> Self:
+        if len(set(self.query_ids)) != len(self.query_ids):
+            raise ValueError("Query IDs must be unique")
+        if len(self.query_ids) > self.max_requests_per_run:
+            raise ValueError("Selected queries exceed the per-run request budget")
+        return self
 
 
 class SourceRegistry(StrictModel):
@@ -275,6 +314,26 @@ class QueryGroup(StrictModel):
 
 class QueryConfig(StrictModel):
     query_groups: dict[str, QueryGroup] = Field(default_factory=dict)
+    searches: dict[str, "SearchQueryConfig"] = Field(default_factory=dict)
+
+    @field_validator("searches")
+    @classmethod
+    def stable_ids(cls, value: dict[str, "SearchQueryConfig"]) -> dict[str, "SearchQueryConfig"]:
+        if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) for key in value):
+            raise ValueError("Search IDs must be bounded stable identifiers")
+        return value
+
+
+class SearchQueryConfig(StrictModel):
+    group: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    text: str = Field(min_length=1, max_length=400)
+
+    @field_validator("text")
+    @classmethod
+    def valid_query(cls, value: str) -> str:
+        if not value.strip() or len(value.split()) > 40 or any(ord(c) < 32 for c in value):
+            raise ValueError("Search query must be nonempty, single-line, and at most 40 words")
+        return value.strip()
 
 
 class AppConfig(StrictModel):
@@ -283,6 +342,17 @@ class AppConfig(StrictModel):
     registry: SourceRegistry
     queries: QueryConfig
     processing: ProcessingConfig
+
+    @model_validator(mode="after")
+    def known_searches(self) -> Self:
+        for source in self.registry.sources:
+            if source.kind == "web_search":
+                options = WebSearchOptions.model_validate(source.config)
+                if any(key not in self.queries.searches for key in options.query_ids):
+                    raise ValueError("Source refers to unknown search IDs")
+        if any(q.group not in self.queries.query_groups for q in self.queries.searches.values()):
+            raise ValueError("Search refers to an unknown query group")
+        return self
 
 
 def load_config(directory: Path) -> AppConfig:

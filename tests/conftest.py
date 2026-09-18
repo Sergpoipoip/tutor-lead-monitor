@@ -2,6 +2,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -15,6 +16,24 @@ from tutor_lead_monitor.db.session import create_db_engine
 ROOT = Path(__file__).resolve().parents[1]
 # Exercise PTB's forward-compatible RetryAfter timedelta representation.
 os.environ.setdefault("PTB_TIMEDELTA", "true")
+
+
+@pytest.fixture(autouse=True)
+def no_real_http(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """All HTTP tests must inject MockTransport, including Yandex and destinations."""
+    attempts: list[bool] = []
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        attempts.append(True)
+        raise AssertionError("Real HTTP transport is forbidden in tests")
+
+    async def async_forbidden(*args: object, **kwargs: object) -> None:
+        forbidden()
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", async_forbidden)
+    yield
+    assert not attempts, "A test attempted real HTTP, even if its caller caught the error"
 
 
 @pytest.fixture(autouse=True)

@@ -78,8 +78,10 @@ def test_source_policy_and_scope(source_config: SourceConfig) -> None:
     data["policy_status"] = "pending"
     with pytest.raises(ValidationError, match="approved"):
         SourceConfig.model_validate(data)
-    data.update(policy_status="approved", kind="web_search", access_method="public_web")
-    with pytest.raises(ValidationError, match="Milestones 1 and 2"):
+    data.update(
+        policy_status="approved", kind="telegram_bot_updates", access_method="authorized_bot"
+    )
+    with pytest.raises(ValidationError, match="Unsupported collector kind"):
         SourceConfig.model_validate(data)
     data["enabled"] = False
     assert not SourceConfig.model_validate(data).enabled

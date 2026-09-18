@@ -21,6 +21,7 @@ class LeadView:
     published_at: datetime | None
     excerpt: str
     url: str | None
+    is_search_snippet: bool = False
 
 
 @dataclass(frozen=True)

@@ -359,6 +359,30 @@ Avoid adding Redis, Celery, Kafka, Elasticsearch, or an LLM dependency until a m
 - manual import and/or notification import;
 - documented source enablement process.
 
+Milestone 4A implements only the first web-search source: Yandex Search API in
+Yandex AI Studio / Yandex Cloud, through the official synchronous REST/XML endpoint.
+The source is disabled with pending policy until the owner reviews access, current
+prices/quotas, storage rights and authorization, then explicitly enables it.
+The dated **2026-09-18** technical review and exact owner procedure are recorded in
+[SOURCES.md](SOURCES.md#17-milestone-4a--yandex-search-api-review-and-owner-enablement).
+
+Collect only title/passages/public-URL discovery evidence; never crawl destinations
+or represent snippets as complete original posts. No smart snippets, scraping or
+CAPTCHA workarounds. API key and folder ID are lazy protected environment settings;
+every request disables provider service-improvement logging. Default explicit runs
+use three queries, ten results each, one top page, Russian search/localization,
+region 225, strict family mode, time-descending flat groups, and the last two weeks.
+Typed configuration enforces at most ten requests/run and twenty results/query.
+Top pages can be revisited without cursor advancement; stable canonical-URL IDs
+prevent duplicate raw insertion. Failed runs can be replayed manually, with bounded
+timeouts, decoding limits and sanitized categories. Collection remains independent
+of processing and Telegram delivery. No real API request is part of tests or CI.
+
+Authorized Telegram collection, manual/email/notification import and other sources
+remain Milestones 4B/4C/5. Scheduling and production deployment remain Milestone 6.
+Milestones 1–3 behavior, including Russian delivery, thresholds, retention and
+immutable frozen messages, stays unchanged. Milestone 4A needs no schema migration.
+
 ### Milestone 5 — VK and Avito
 
 - VK collector only through currently supported official access;
@@ -419,7 +443,7 @@ Production deployment is complete when all of the following are true:
 Resolve these before production, not before Milestone 1:
 
 - deployment host and backup strategy;
-- final web-search provider and its current pricing/terms;
+- revalidation of the selected Yandex web-search provider's pricing/terms before enablement;
 - Telegram communities that will explicitly allow bot access;
 - whether Avito notifications will arrive by email, manual forwarding, or an official account integration;
 - target offline locations and travel radius;

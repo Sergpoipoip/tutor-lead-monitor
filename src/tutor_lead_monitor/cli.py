@@ -21,6 +21,7 @@ from tutor_lead_monitor.application.collect import run_collector
 from tutor_lead_monitor.application.failed import inspect_failed, reset_failed, validate_selection
 from tutor_lead_monitor.application.process import process_pending
 from tutor_lead_monitor.application.retention import run_retention
+from tutor_lead_monitor.collectors.factory import build_collector
 from tutor_lead_monitor.collectors.fixture import FixtureCollector
 from tutor_lead_monitor.config import FixtureOptions, Settings, load_config
 from tutor_lead_monitor.db.repositories import sync_source
@@ -112,7 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "send-digest",
         ],
     )
-    parser.add_argument("--source", default="fixture", help="Fixture registry key")
+    parser.add_argument("--source", default="fixture", help="Source registry key")
     parser.add_argument(
         "--local-date", type=date.fromisoformat, help="Digest date in configured timezone"
     )
@@ -226,12 +227,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.command == "pipeline" and not source.enabled:
                     continue
                 try:
-                    options = FixtureOptions.model_validate(source.config)
+                    collector = build_collector(source, config, settings)
                     outcome = asyncio.run(
                         run_collector(
                             engine,
                             source,
-                            FixtureCollector(source.key, options.page_size, options.dataset),
+                            collector,
                         )
                     )
                     print(json.dumps(asdict(outcome), default=str))

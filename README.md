@@ -1,6 +1,6 @@
 # Tutor Lead Monitor
 
-Milestones 1–3: a local, deterministic pipeline for permitted literature-tutor
+Milestones 1–3 plus Milestone 4A: a local pipeline for permitted literature-tutor
 requests. Read the authoritative [product specification](docs/PROJECT_SPEC.md),
 [architecture](docs/ARCHITECTURE.md), and [source policy](docs/SOURCES.md), version 0.2.
 
@@ -8,8 +8,9 @@ Implemented: typed configuration, JSON logs, fixture collection, atomic raw
 persistence, normalization, rule classification, conservative extraction,
 explainable scoring, exact/fuzzy deduplication, and retention with dry-run counts.
 Telegram alerts, digests, owner commands, and feedback are implemented for explicit
-local execution. Real collectors, scheduling, and deployment remain later milestones.
-Only Telegram functionality requires a bot token; fixtures and processing work without it.
+local execution. The first real collector, Yandex Search API, is implemented but
+disabled pending owner review. Other real collectors, scheduling, and deployment
+remain later milestones. Fixtures and processing require no provider credentials.
 
 ## Local setup
 
@@ -50,7 +51,7 @@ uv run tutor-lead-monitor collect --source fixture
 uv run tutor-lead-monitor collect --source fixture_crosspost
 # Process pending items independently (bounded work per invocation):
 uv run tutor-lead-monitor process --limit 1000 --as-of 2026-01-01T13:00:00Z
-# Collect every enabled fixture source, then process pending items:
+# Collect every enabled supported source, then process pending items:
 uv run tutor-lead-monitor pipeline --as-of 2026-01-01T13:00:00Z
 # Repeating the pipeline is safe:
 uv run tutor-lead-monitor pipeline --as-of 2026-01-01T13:00:00Z
@@ -195,17 +196,20 @@ both in tests. All non-secret business settings are version-controlled YAML.
 | `config/processing.yml` | Classifier version, regex rules, priorities, confidence, boilerplate |
 | `config/scoring.yml` | Score version, weights, thresholds, freshness/stale periods |
 | `config/business.yml` | Timezone, local digest preferences, retention, deduplication |
-| `config/sources.yml` | Enabled synthetic sources and required operations policy |
+| `config/sources.yml` | Enabled fixtures, disabled Yandex source and operations policy |
 | `config/sources.example.yml` | Disabled future-source reference, not automatically loaded |
-| `config/queries.yml` | Provider-neutral query groups for future collectors |
+| `config/queries.yml` | Query groups and executable searches selected by stable IDs |
 | `DATABASE_URL` | Required `postgresql+psycopg://` URL |
 | `CONFIG_DIR` | YAML directory, defaults to `config` |
 | `LOG_LEVEL` | DEBUG, INFO, WARNING, ERROR; defaults to INFO |
 | `HEALTH_INTERVAL_SECONDS` | Foundation health polling interval, defaults to 30 |
+| `YANDEX_SEARCH_API_KEY` | Secret API key; validated only for explicit Yandex collection |
+| `YANDEX_SEARCH_FOLDER_ID` | Private deployment folder ID; same lazy validation |
 
 Validation rejects unknown YAML fields, duplicate source/rule IDs, invalid regexes,
 invalid timezones, nonpositive intervals, overlapping score bands, unapproved
-enabled sources, and every enabled real source. Never place secrets in YAML or
+enabled sources, unsupported enabled collectors, invalid Yandex options, query
+references and request budgets. Never place secrets or folder identifiers in YAML or
 metadata. Telegram commands additionally validate secret settings and the owner allowlist.
 
 Every source requires `operations`: positive `freshness_sla_seconds` and
@@ -304,8 +308,8 @@ ORM metadata to the migrated schema. Validate workflow syntax locally with:
 docker run --rm -i rhysd/actionlint:latest - < .github/workflows/ci.yml
 ```
 
-`uv.lock` continues to pin the existing dependencies; Milestone 2 adds no new
-runtime library. Update dependencies deliberately with `uv lock --upgrade` and
+`uv.lock` pins dependencies; Milestone 4A declares `httpx` as a direct dependency
+(the existing locked version remains unchanged). Update deliberately with `uv lock --upgrade` and
 rerun all checks. The Docker image installs the locked runtime subset.
 
 ## Telegram setup and explicit operation
@@ -459,13 +463,90 @@ deleted before manually deleting the corresponding feedback.
 Tests block real Telegram transport calls. The full suite covers fake transport
 retries, concurrent sends, DST, callbacks, persistent pause and migration drift.
 
-## Before Milestone 4
+## Milestone 4A — Yandex Search API
+
+The disabled `yandex_web_search` source uses the official synchronous REST API at
+`https://searchapi.api.cloud.yandex.net/v2/web/search`, API-key authentication and
+XML results. It was selected for Russian-language discovery, region/date controls,
+and a bounded request budget. Technical documentation/pricing review: **2026-09-18**;
+this does not constitute owner approval or a live provider test. See the
+[official-contract review and exact enablement checklist](docs/SOURCES.md#17-milestone-4a--yandex-search-api-review-and-owner-enablement).
+
+Only provider-returned title, passages and public URL are collected. Destinations
+are never fetched, even for VK/Telegram/Avito search results. Search evidence is
+explicitly marked as a snippet in metadata and Russian Telegram cards; it is not a
+full original post. Missing publication timestamps remain unknown. Raw collection
+timestamps use actual UTC time, independently of `--as-of`.
+
+Defaults: Russian search/localization, Russia region 225, strict family filtering,
+time descending, flat groups, 10 results per query (maximum 20), page zero only,
+last two weeks. The versioned catalog contains ten queries; only the three IDs in
+source `config.query_ids` execute. `max_requests_per_run` defaults to 3 and cannot
+exceed 10; selecting more queries than the cap fails configuration validation.
+Each rendered query is at most 400 characters/40 words. There are no automatic
+retries, smart snippets, redirects, destination crawling, or environment proxies.
+Network and decoding are bounded; malformed Base64/XML and DTD/entities fail safely.
+
+Each explicit run revisits top results with no advancing cursor. Canonical-URL
+SHA-256 IDs and database uniqueness prevent duplicate raw inserts across queries
+and runs. Fragments/tracking keys are removed for identity, while meaningful URL
+parameters remain. The first occurrence stays immutable, so later snippets for
+the same URL do not overwrite evidence. A partial run preserves completed pages;
+repeating it can repeat billed requests. Rate-limit/server errors with a valid
+bounded Retry-After set a stored source pause (up to 300 seconds). Persistent failures
+need manual review; no scheduling or threshold-based automatic pausing is added.
+
+Before the first live request:
+
+1. Review current provider access, applicable storage terms, billing-account prices
+   and quota. Create an API key and folder with the required role using the official
+   setup links in SOURCES.md; set a provider spending budget.
+2. Put `YANDEX_SEARCH_API_KEY` and `YANDEX_SEARCH_FOLDER_ID` in ignored `.env` or
+   protected environment variables. Use the secret key, not its ID. Neither value
+   belongs in YAML, shell command text, logs or database metadata. Unrelated commands
+   work without them. Compose passes these optional variables to application services.
+3. Complete the source's policy reviewer/date/notes and authorization expiry as
+   applicable. Only after your review, set `policy_status: approved` and `enabled: true`.
+   For the smoke test select `[seek_tutor]`, `max_requests_per_run: 1`, and
+   `results_per_query: 5` in its options.
+4. Run the following manually. `collect` is the first paid provider call and does
+   not process records or deliver notifications:
+
+```sh
+uv run tutor-lead-monitor check-config
+uv run tutor-lead-monitor migrate
+uv run tutor-lead-monitor sync-sources
+uv run tutor-lead-monitor collect --source yandex_web_search
+# Review evidence privately, then optionally process and deliver:
+uv run tutor-lead-monitor process --limit 1000
+uv run tutor-lead-monitor notify-immediate --limit 100
+uv run tutor-lead-monitor send-digest
+```
+
+While disabled/pending, explicit collection fails before HTTP; `pipeline` skips
+disabled sources. Once enabled, `pipeline` includes Yandex and can incur costs.
+Every provider request sends `x-data-logging-enabled: false`. This disables provider
+request-data logging for service improvement; it is not a grant of local retention
+rights. Recheck prices and terms before enablement; the dated review in SOURCES.md
+is not a price guarantee. No real API call or source approval was performed here.
+
+Emergency disable: set `enabled: false` (and optionally `policy_status: paused`),
+run `sync-sources`, stop in-flight collection, and revoke a compromised key at the
+provider. Started HTTP requests cannot be recalled. Preserve source and audit
+history. Disable before rolling back code; use the older release's configuration
+if it rejects the new fields. No database migration is needed for Milestone 4A.
+
+All HTTP tests use fake transports; a suite-wide guard rejects real HTTP transport,
+including accidental Yandex or destination requests. Telegram, digest time
+(09:00 Europe/Rome), thresholds (45/55/90), and frozen snapshots remain unchanged.
+
+## Before later source milestones
 
 Expand the anonymized corpus and review false positives/false merges before real
 source enablement. Rules are heuristic; evidence spans refer to normalized text,
 location extraction requires explicit labels, and similarity is lexical.
 Feedback-protected evidence and unresolved failed/pending work need manual review.
-Review source permissions and credential handling before implementing any real
+Review source permissions and credential handling before enabling any real
 collector. All delivery verification uses fake clients; implementation tests never
 call Telegram. Perform an owner-controlled live bot smoke test after configuring
 local credentials. No production scheduler or deployment is included.

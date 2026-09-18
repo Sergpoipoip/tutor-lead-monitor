@@ -35,6 +35,8 @@ def app_config() -> AppConfig:
 
 async def collect_corpus(engine: Engine) -> None:
     for source in app_config().registry.sources:
+        if source.kind != "fixture":
+            continue
         dataset = "crosspost" if source.key == "fixture_crosspost" else "primary"
         result = await run_collector(engine, source, FixtureCollector(source.key, dataset=dataset))
         assert result.status == "succeeded"
@@ -228,7 +230,11 @@ async def test_parallel_processors_do_not_create_duplicate_leads(migrated_engine
 
 def insert_pair(engine: Engine, first: CollectedItem, second: CollectedItem) -> None:
     with Session(engine) as session, session.begin():
-        for source, item in zip(app_config().registry.sources, (first, second), strict=True):
+        for source, item in zip(
+            [s for s in app_config().registry.sources if s.kind == "fixture"],
+            (first, second),
+            strict=True,
+        ):
             source_id = sync_source(session, source)
             persist_page(
                 session,

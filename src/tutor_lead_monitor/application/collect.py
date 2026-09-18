@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import Engine, select, update
@@ -12,6 +12,7 @@ from tutor_lead_monitor.db.locks import MAINTENANCE, source_lock, transaction_lo
 from tutor_lead_monitor.db.models import CollectionRun, CollectorState, Source
 from tutor_lead_monitor.db.repositories import persist_page, sync_source
 from tutor_lead_monitor.domain.models import CollectionContext, CollectionPage, utc
+from tutor_lead_monitor.search.base import SearchError
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ async def run_collector(
 ) -> CollectionResult:
     if collector.key != config.key or not config.enabled or config.policy_status != "approved":
         raise ValueError("Collector must match an enabled approved source")
-    if config.kind != "fixture":
-        raise ValueError("Only fixture collectors are implemented")
+    if config.kind not in {"fixture", "web_search"}:
+        raise ValueError("Unsupported collector kind")
     now = datetime.now(UTC)
     if (
         config.operations.authorization_expires_at is not None
@@ -64,6 +65,7 @@ async def run_collector(
         seen = inserted = failed = 0
         error_category: str | None = None
         checkpoint = context.cursor
+        retry_after: int | None = None
         try:
             async for page in collector.collect(context):
                 seen += len(page.items)
@@ -117,7 +119,11 @@ async def run_collector(
                     failed += len(page.items)
                     raise
         except Exception as error:
-            error_category = type(error).__name__
+            error_category = (
+                error.category.value if isinstance(error, SearchError) else type(error).__name__
+            )
+            if isinstance(error, SearchError):
+                retry_after = error.retry_after
         status = "succeeded" if error_category is None else "partial" if seen > failed else "failed"
         with Session(connection) as session, session.begin():
             transaction_lock(session, MAINTENANCE, shared=True)
@@ -140,6 +146,8 @@ async def run_collector(
                 state.consecutive_failures = 0
             else:
                 state.consecutive_failures += 1
+                if retry_after is not None:
+                    state.paused_until = datetime.now(UTC) + timedelta(seconds=retry_after)
         logger.info(
             "collection_finished",
             extra={

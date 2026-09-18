@@ -197,6 +197,50 @@ Requirements:
 
 ## 6. Database model
 
+### Milestone 4A search boundary
+
+`search/base.py` defines immutable provider-neutral `SearchResult`/`SearchPage`
+records and a top-page `SearchProvider` protocol. `search/yandex.py` implements the
+official synchronous REST/XML request through directly declared `httpx`, with an
+injectable transport. It owns Yandex request fields, strict bounded Base64/XML
+decoding, optional-field handling and sanitized `SearchError` categories. No SDK,
+smart snippets or destination requests are involved. See the
+[2026-09-18 provider review](SOURCES.md#17-milestone-4a--yandex-search-api-review-and-owner-enablement)
+for the endpoint/authentication contract, date-field discrepancy, prices and limits.
+
+`collectors/web_search.py` consumes only neutral results and produces `CollectedItem`;
+it never imports classification, deduplication or delivery. The explicit factory in
+`collectors/factory.py` supports fixture and Yandex web search, failing closed for
+unsupported collectors. Both CLI `collect` and `pipeline` use it. Configuration,
+enabled/approved/expiry gates and lazy credential validation precede provider use;
+the existing orchestration also checks stored source state and pauses under its
+per-source advisory lock. Disabled Yandex remains safe to register with `sync-sources`.
+
+The versioned `queries.yml` catalog contains executable strings and group IDs.
+`WebSearchOptions` selects query IDs and bounded request/result counts (defaults
+3/10, maxima 10/20); the entire selected set must fit the cap. Every explicit run
+replays page zero for each selected query and returns `next_cursor=None`, regardless
+of old cursors or high-water marks. A failure stops the run, preserving committed
+pages. No retries or scheduler are added; a valid bounded Retry-After creates a
+stored pause so immediate manual reruns respect provider backoff.
+
+Search URL identity uses a conservative public-URL canonicalizer, preserving
+meaningful query ordering/encoding/parameters. External IDs are its SHA-256 hash;
+database source/external-ID uniqueness preserves the first raw evidence across
+query/run repetition. Original URLs remain in raw records. Processing and Telegram
+links use this canonicalizer for search snippets, leaving fixture behavior intact.
+Only bounded title/passages and minimal group/rank/domain/provider/evidence-kind
+metadata are retained. Publication time is unknown unless explicit aware publication
+metadata exists; update/crawl times are not substituted. Collection time is actual
+UTC. New Telegram views label snippets in Russian, without rewriting frozen chunks.
+
+Existing source, raw-item, cursor and run tables support this contract; there is no
+new migration. Credentials/folder IDs never enter registry JSON, logs or exceptions.
+The API-key and folder settings are redacted and excluded from settings serialization.
+HTTP transports are mocked in tests, with a guard against all real HTTP. Collection,
+processing and delivery remain explicit manual operations, with production scheduling
+and deployment reserved for Milestone 6.
+
 Use UUID primary keys unless there is a clear reason otherwise. Use timezone-aware timestamps. Add `created_at` and `updated_at` where operationally useful.
 
 ### 6.1 `sources`

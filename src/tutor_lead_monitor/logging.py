@@ -38,3 +38,6 @@ def configure_logging(level: str = "INFO") -> None:
     handler.setFormatter(JsonFormatter())
     logging.basicConfig(level=level, handlers=[handler], force=True)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    # Transport debug logs can include response headers; never expose provider payloads.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

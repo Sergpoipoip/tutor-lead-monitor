@@ -10,3 +10,35 @@ query_groups:
     subject_any: ["олимпиада по литературе", "ВСОШ по литературе"]
   indirect_help:
     phrases_any: ["подтянуть литературу", "помочь с литературой", "помочь с сочинением", "разбирать произведения"]
+# Executable, non-secret top-page searches; source options select a bounded subset.
+searches:
+  seek_tutor:
+    group: explicit_literature
+    text: '"ищу репетитора" литература'
+  need_tutor:
+    group: explicit_literature
+    text: '"нужен репетитор" литература'
+  recommend_tutor:
+    group: explicit_literature
+    text: '"посоветуйте репетитора" литература'
+  seek_teacher:
+    group: explicit_literature
+    text: '"ищу преподавателя" литература'
+  literature_help:
+    group: indirect_help
+    text: '"помочь с литературой" репетитор'
+  literature_exam:
+    group: exams
+    text: '"ЕГЭ по литературе" репетитор'
+  literature_vsosh:
+    group: olympiad
+    text: '"ВСОШ по литературе" репетитор'
+  vk_literature:
+    group: explicit_literature
+    text: 'site:vk.com "ищу репетитора" литература'
+  telegram_literature:
+    group: explicit_literature
+    text: 'site:t.me "ищу репетитора" литература'
+  avito_literature:
+    group: explicit_literature
+    text: 'site:avito.ru "ищу репетитора" литература'
