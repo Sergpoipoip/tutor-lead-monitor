@@ -6,6 +6,9 @@ x-app: &app
     DATABASE_URL: postgresql+psycopg://tutor_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}@postgres:5432/tutor_lead_monitor
     CONFIG_DIR: /app/config
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+    TELEGRAM_RECIPIENT_CHAT_ID: ${TELEGRAM_RECIPIENT_CHAT_ID:-}
   init: true
 
 services:

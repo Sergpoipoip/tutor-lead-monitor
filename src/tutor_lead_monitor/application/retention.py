@@ -14,6 +14,7 @@ from tutor_lead_monitor.db.models import (
     Lead,
     LeadOccurrence,
     Notification,
+    NotificationChunk,
     NotificationItem,
     RawItem,
     Source,
@@ -30,6 +31,7 @@ class RetentionResult:
     lead_occurrences: int
     raw_items: int
     collection_runs: int
+    notification_chunks: int = 0
 
 
 def run_retention(
@@ -62,6 +64,40 @@ def run_retention(
                 )
             )
         )
+        # Keep idempotency envelopes for retained leads, including feedback-protected leads.
+        # Digest envelopes link several leads, so preserve their dependency closure too.
+        protected.update(
+            session.scalars(
+                select(Lead.id).where(
+                    Lead.last_seen_at >= instant - timedelta(days=config.leads_days)
+                )
+            )
+        )
+        links = list(
+            session.execute(
+                select(Notification.id, Notification.lead_id).where(
+                    Notification.lead_id.is_not(None)
+                )
+            ).tuples()
+        )
+        links.extend(
+            session.execute(
+                select(NotificationItem.notification_id, NotificationItem.lead_id)
+            ).tuples()
+        )
+        while True:
+            keep_envelopes = {
+                notification_id for notification_id, lead_id in links if lead_id in protected
+            }
+            notification_ids.difference_update(keep_envelopes)
+            expanded = {
+                lead_id
+                for notification_id, lead_id in links
+                if notification_id not in notification_ids and lead_id is not None
+            }
+            if expanded <= protected:
+                break
+            protected.update(expanded)
         lead_ids = set(
             session.scalars(
                 select(Lead.id).where(
@@ -123,8 +159,20 @@ def run_retention(
             sum(lead_id in lead_ids for lead_id, _ in occurrences),
             len(raw_ids),
             len(run_ids),
+            len(
+                session.scalars(
+                    select(NotificationChunk.position).where(
+                        NotificationChunk.notification_id.in_(notification_ids)
+                    )
+                ).all()
+            ),
         )
         if not dry_run:
+            session.execute(
+                delete(NotificationChunk).where(
+                    NotificationChunk.notification_id.in_(notification_ids)
+                )
+            )
             # Explicit dependency order; never delete feedback or rely on cascades.
             session.execute(
                 delete(NotificationItem).where(

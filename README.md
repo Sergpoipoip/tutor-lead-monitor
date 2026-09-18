@@ -1,14 +1,15 @@
 # Tutor Lead Monitor
 
-Milestones 1–2: a local, deterministic pipeline for permitted literature-tutor
+Milestones 1–3: a local, deterministic pipeline for permitted literature-tutor
 requests. Read the authoritative [product specification](docs/PROJECT_SPEC.md),
 [architecture](docs/ARCHITECTURE.md), and [source policy](docs/SOURCES.md), version 0.2.
 
 Implemented: typed configuration, JSON logs, fixture collection, atomic raw
 persistence, normalization, rule classification, conservative extraction,
 explainable scoring, exact/fuzzy deduplication, and retention with dry-run counts.
-Telegram delivery, real collectors, production scheduling, and deployment remain
-later milestones. No provider account or API credential is needed.
+Telegram alerts, digests, owner commands, and feedback are implemented for explicit
+local execution. Real collectors, scheduling, and deployment remain later milestones.
+Only Telegram functionality requires a bot token; fixtures and processing work without it.
 
 ## Local setup
 
@@ -71,8 +72,8 @@ the current clock makes the old fixtures stale and can change eligibility.
 The processing limit applies to each explicit invocation; run `process` again
 when more pending records remain. Collection/processing failures produce a
 nonzero CLI exit status and sanitized error categories. The complete pipeline
-continues with other enabled sources after a source failure. No command sends
-notifications or starts a collection scheduler.
+continues with other enabled sources after a source failure. Collection and processing commands do not send notifications. Delivery uses the
+explicit commands below; no collection scheduler is started.
 
 ## Processing and transaction boundaries
 
@@ -109,7 +110,7 @@ literature subject, family requests for help are recognized, and “требуе
 corpus in `tests/fixtures/classification_ru.yml` covers positive, negative,
 ambiguous, and negated examples. Default bands are review **45–54**, daily digest
 **55–89**, and immediate **90–100**. A fresh “Ищу репетитора по литературе” scores
-61 and is digest-eligible; delivery remains a later milestone.
+61 and is digest-eligible; delivery uses the explicit commands below.
 
 Collection takes a per-source session advisory lock on a dedicated connection.
 Each page commits its valid items, run counters, and checkpoint together.
@@ -193,7 +194,7 @@ both in tests. All non-secret business settings are version-controlled YAML.
 |---|---|
 | `config/processing.yml` | Classifier version, regex rules, priorities, confidence, boilerplate |
 | `config/scoring.yml` | Score version, weights, thresholds, freshness/stale periods |
-| `config/business.yml` | Timezone, future digest preferences, retention, deduplication |
+| `config/business.yml` | Timezone, local digest preferences, retention, deduplication |
 | `config/sources.yml` | Enabled synthetic sources and required operations policy |
 | `config/sources.example.yml` | Disabled future-source reference, not automatically loaded |
 | `config/queries.yml` | Provider-neutral query groups for future collectors |
@@ -205,7 +206,7 @@ both in tests. All non-secret business settings are version-controlled YAML.
 Validation rejects unknown YAML fields, duplicate source/rule IDs, invalid regexes,
 invalid timezones, nonpositive intervals, overlapping score bands, unapproved
 enabled sources, and every enabled real source. Never place secrets in YAML or
-metadata. Telegram secrets and allowlist validation belong to Milestone 3.
+metadata. Telegram commands additionally validate secret settings and the owner allowlist.
 
 Every source requires `operations`: positive `freshness_sla_seconds` and
 `pause_after_consecutive_failures`, a non-empty `quota_policy`, and optional
@@ -242,8 +243,7 @@ raw items, active runs, sources, and cursors remain for diagnosis or future work
 Dependencies can therefore extend retention beyond its nominal period.
 
 Retention holds an exclusive maintenance advisory lock; collection pages and
-processing transactions take its shared counterpart. Future notification/feedback
-writers must use the same gate. No broad cascade deletion is used.
+processing transactions take its shared counterpart. Notification and feedback writers use the same gate. No broad cascade deletion is used.
 
 ## Containers, migrations, and CI
 
@@ -302,12 +302,110 @@ docker run --rm -i rhysd/actionlint:latest - < .github/workflows/ci.yml
 runtime library. Update dependencies deliberately with `uv lock --upgrade` and
 rerun all checks. The Docker image installs the locked runtime subset.
 
-## Before Milestone 3
+## Telegram setup and explicit operation
+
+Create a bot using the official [BotFather guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token).
+Keep its token only in your ignored `.env` or environment. Never commit it or put
+it in shell history, logs, or screenshots. Obtain your numeric owner ID from a
+trusted Telegram client/account export; usernames are insufficient. Open a private
+conversation with your bot and press Start before trying delivery.
+
+```dotenv
+TELEGRAM_BOT_TOKEN=REPLACE_WITH_BOTFATHER_TOKEN
+TELEGRAM_ALLOWED_USER_IDS=REPLACE_WITH_COMMA_SEPARATED_OWNER_IDS
+TELEGRAM_RECIPIENT_CHAT_ID=REPLACE_WITH_PRIVATE_OWNER_CHAT_ID
+```
+
+The recipient must be a positive private chat ID in the allowlist. Group/channel
+delivery is excluded from this owner-only MVP. Settings validate on Telegram startup;
+fixture commands work without them. The maintained
+[python-telegram-bot library](https://docs.python-telegram-bot.org/en/stable/) is
+isolated in the Telegram adapter; no job-queue extra is installed.
+
+```sh
+uv sync --locked
+uv run tutor-lead-monitor migrate
+# Long polling for owner commands and feedback only:
+uv run tutor-lead-monitor telegram-bot
+# In a second terminal, explicitly send eligible alerts/digests:
+uv run tutor-lead-monitor notify-immediate --limit 100
+uv run tutor-lead-monitor send-digest
+uv run tutor-lead-monitor send-digest --local-date 2026-09-18
+```
+
+Migration `7d8905a1ece6` adds recipient pause state, frozen notification chunks and
+callback receipts. Existing evidence and constraints are preserved. Downgrading
+removes this new delivery state and is for disposable data or reviewed rollback only.
+Compose passes optional Telegram variables into containers; `serve` remains the
+health lifecycle and does not start the bot or a scheduler.
+
+Owner commands: `/start`, `/help`, `/status`, `/digest`, `/pause`, `/resume`.
+Commands work only in an authorized user's private chat; callbacks must originate
+from the configured recipient chat. Unknown users receive no command response or
+administrative details. `/status` reports DB availability, persistent pause state,
+recent collection runs, processing/notification counts, and the next configured
+09:00 Europe/Rome digest time. That time is informational in Milestone 3.
+
+`/pause` blocks immediate and non-explicit digest delivery across restarts.
+Explicit `/digest` and CLI `send-digest` remain allowed while paused. An in-flight
+send cannot be recalled; a pause command encountering the recipient lock reports
+busy and must be retried. Collection and processing continue.
+
+### Digest and feedback semantics
+
+A digest includes active leads discovered (`leads.created_at`) within the requested
+local date, including already-alerted leads. Ordering is score, canonical publication
+or collection freshness, then UUID. Rome midnight boundaries correctly span 23/25
+hours on DST days. Statistics include collected/rejected raw items, new leads, and
+immediate/digest/review band counts.
+
+The first nonempty request freezes membership and chunks. Repeated requests resume
+delivery or return the existing result. Later arrivals are not appended; choose
+the requested date and execution time deliberately during local operation. No empty
+message or envelope is created with `send_empty_digest: false`, so a later nonempty
+request still works. Thresholds are review 45, digest 55, immediate 90.
+
+Messages use escaped HTML, HTTP(S) links, bounded excerpts and conservative UTF-16
+limits. Complete cards and links stay intact across chunks. Numbered feedback rows
+identify their digest card; callback data contains only an action and UUID.
+Interested → interested; Not relevant → rejected; Duplicate → duplicate; Closed →
+closed. Changed choices append feedback; the latest accepted choice wins. Identical
+consecutive choices are no-ops, and replayed callbacks cannot undo later choices.
+Scores/reasons stay unchanged. Authorized callbacks receive an acknowledgement
+attempt even for invalid data or missing leads.
+
+### Delivery retries and uncertain outcomes
+
+Envelopes reserve before sending. Chunk attempts commit before network I/O; a
+recipient session lock prevents competing senders. Sent chunks are not intentionally
+resent. Safe connection failures and rate limits retry the same chunk, at most three
+attempts, with persisted exponential backoff, jitter and Telegram retry-after. Rerun
+the same command after the due time; no retry scheduler is installed. A failed alert
+does not block other leads. Authorization, malformed and permanent failures stop.
+
+Telegram sendMessage has no caller-provided idempotency key. A timeout/lost response
+may mean Telegram accepted the message, so exactly-once network delivery cannot be
+guaranteed. These chunks and interrupted `sending` attempts become ambiguous and
+are never automatically resent or replaced. Review the owner chat and internal
+notification/chunk IDs before targeted database repair; do not blindly reset them.
+A crash after sending but before recording success has the same ambiguity.
+Errors/logs contain safe categories, never updates, tokens, contacts or post bodies.
+
+Frozen chunks contain the authorized excerpt and share notification retention.
+Retention explicitly deletes chunks before envelopes; envelopes for retained leads
+remain as idempotency evidence. Callback receipts remain with feedback and must be
+explicitly deleted before manually deleting the corresponding feedback.
+
+Tests block real Telegram transport calls. The full suite covers fake transport
+retries, concurrent sends, DST, callbacks, persistent pause and migration drift.
+
+## Before Milestone 4
 
 Expand the anonymized corpus and review false positives/false merges before real
 source enablement. Rules are heuristic; evidence spans refer to normalized text,
 location extraction requires explicit labels, and similarity is lexical.
 Feedback-protected evidence and unresolved failed/pending work need manual review.
-Choose the Telegram owner allowlist, timezone/digest time, and final delivery
-thresholds; then implement delivery and notification retries against fake clients
-first. No Telegram messages or real-source requests have been made by this pipeline.
+Review source permissions and credential handling before implementing any real
+collector. All delivery verification uses fake clients; implementation tests never
+call Telegram. Perform an owner-controlled live bot smoke test after configuring
+local credentials. No production scheduler or deployment is included.

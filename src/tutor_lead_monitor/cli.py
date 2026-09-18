@@ -6,9 +6,10 @@ import signal
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, date, datetime
 from threading import Event
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from alembic import command
 from alembic.config import Config
@@ -106,9 +107,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "retention",
             "failed",
             "retry-failed",
+            "telegram-bot",
+            "notify-immediate",
+            "send-digest",
         ],
     )
     parser.add_argument("--source", default="fixture", help="Fixture registry key")
+    parser.add_argument(
+        "--local-date", type=date.fromisoformat, help="Digest date in configured timezone"
+    )
     parser.add_argument("--limit", type=int, help="Maximum records (failed commands: 1..1000)")
     parser.add_argument("--record-id", type=UUID, help="Internal failed-record UUID to reset")
     parser.add_argument(
@@ -140,6 +147,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = Settings()
         configure_logging(settings.log_level)
         config = load_config(settings.config_dir)
+        telegram_access = (
+            settings.telegram_access()
+            if args.command in {"telegram-bot", "notify-immediate", "send-digest"}
+            else None
+        )
         if args.command == "check-config":
             logger.info("configuration_valid")
             return 0
@@ -161,6 +173,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.info("migrations_applied")
             return 0
         check_ready(engine)
+        if telegram_access is not None:
+            from telegram import Bot
+
+            from tutor_lead_monitor.application.bot import OwnerAccess
+            from tutor_lead_monitor.application.notify import send_digest, send_immediate
+            from tutor_lead_monitor.notifications.telegram import TelegramNotifier, run_bot
+
+            token, allowed, recipient = telegram_access
+            if args.command == "telegram-bot":
+                run_bot(engine, config, token, OwnerAccess(allowed, recipient))
+                return 0
+
+            async def notify() -> int:
+                assert engine is not None
+                async with Bot(token) as bot:
+                    notifier = TelegramNotifier(bot)
+                    now = args.as_of or datetime.now(UTC)
+                    if args.command == "notify-immediate":
+                        result = await send_immediate(
+                            engine, config, recipient, notifier, now=now, limit=args.limit or 100
+                        )
+                    else:
+                        day = (
+                            args.local_date
+                            or now.astimezone(ZoneInfo(config.business.timezone)).date()
+                        )
+                        result = await send_digest(
+                            engine, config, recipient, notifier, day, now=now, explicit=True
+                        )
+                    print(json.dumps(asdict(result)))
+                    return int(result.failed > 0)
+
+            return asyncio.run(notify())
         if args.command == "failed":
             print(json.dumps(asdict(inspect_failed(engine, limit=args.limit or 100)), default=str))
             return 0

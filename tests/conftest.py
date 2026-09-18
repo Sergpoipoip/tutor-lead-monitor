@@ -13,6 +13,16 @@ from tutor_lead_monitor.config import Settings, SourceConfig, load_config
 from tutor_lead_monitor.db.session import create_db_engine
 
 ROOT = Path(__file__).resolve().parents[1]
+# Exercise PTB's forward-compatible RetryAfter timedelta representation.
+os.environ.setdefault("PTB_TIMEDELTA", "true")
+
+
+@pytest.fixture(autouse=True)
+def no_telegram_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Tests must use fake Telegram transports")
+
+    monkeypatch.setattr("telegram.Bot._post", forbidden)
 
 
 @pytest.fixture

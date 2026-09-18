@@ -318,6 +318,32 @@ Idempotency constraints:
 | `created_at` | timestamp |
 | `metadata` | JSONB without message text or secrets |
 
+### 6.9 Milestone 3 delivery state
+
+- `recipient_states`: recipient key, persistent delivery pause flag, timestamps.
+- `notification_chunks`: envelope/position composite key, frozen escaped text and
+  buttons, status, attempts, next retry time, safe error category, provider message
+  ID and sent timestamp. `ambiguous` identifies uncertain sends.
+- `callback_receipts`: callback ID primary key and feedback foreign key; replaying
+  an old callback cannot undo newer feedback.
+
+Recipient session advisory locks serialize reservation and delivery across workers.
+Transactions finish before network calls. Successfully sent chunks are never resent.
+Safe connection failures and rate limits retry the same chunk, at most three times,
+with persisted exponential backoff, jitter and retry-after. Timeouts and interrupted
+sends require manual review: Telegram sendMessage has no caller idempotency key.
+
+Digest membership freezes on the first nonempty request for a recipient/local date,
+using leads discovered (`created_at`) that day. Rome midnight boundaries convert
+independently to UTC for DST. Immediate-alert leads remain eligible. Explicit
+/digest and CLI send-digest are allowed while paused; immediate delivery is not.
+Empty digests create no envelope when send_empty_digest is false.
+
+Feedback retains changed choices; consecutive identical choices are no-ops and
+new changed choices set lead status. Receipts deduplicate old callbacks. Scores and
+reasons never change through feedback. Retention explicitly deletes chunks before
+envelopes and retains idempotency envelopes for retained leads.
+
 ## 7. Transactions and idempotency
 
 ### Collection
@@ -476,7 +502,7 @@ Suggested defaults:
 - high-value authorized feeds: every 5–10 minutes;
 - web search: every 30–60 minutes, subject to provider quota;
 - processing and immediate delivery: after each collection run and every 5 minutes as a safety net;
-- daily digest: configurable, default 19:00 user timezone;
+- daily digest: configurable, default 09:00 Europe/Rome (explicit execution in Milestone 3);
 - retention cleanup: once daily;
 - source health summary: once daily or via `/status`.
 

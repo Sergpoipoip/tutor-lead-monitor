@@ -236,3 +236,40 @@ class Feedback(UUIDPrimaryKey, Base):
     metadata_: Mapped[dict[str, JSONValue]] = mapped_column(
         "metadata", JSONB, server_default=sql_text("'{}'::jsonb")
     )
+
+
+class RecipientState(Timestamps, Base):
+    __tablename__ = "recipient_states"
+
+    recipient_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    paused: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"))
+
+
+class NotificationChunk(Base):
+    __tablename__ = "notification_chunks"
+    __table_args__ = (
+        CheckConstraint("position >= 0 AND attempt_count >= 0", name="counts"),
+        CheckConstraint(
+            "status IN ('pending','sending','sent','failed','ambiguous')", name="status"
+        ),
+    )
+
+    notification_id: Mapped[UUID] = mapped_column(ForeignKey("notifications.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    buttons: Mapped[list[dict[str, JSONValue]]] = mapped_column(
+        JSONB, server_default=sql_text("'[]'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(String(20), server_default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, server_default="0")
+    provider_message_id: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(30))
+
+
+class CallbackReceipt(Base):
+    __tablename__ = "callback_receipts"
+
+    callback_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    feedback_id: Mapped[UUID] = mapped_column(ForeignKey("feedback.id"))

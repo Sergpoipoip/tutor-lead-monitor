@@ -9,6 +9,7 @@ description = "A permitted-source literature tutor lead monitor"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "python-telegram-bot>=22.8,<23",
   "SQLAlchemy>=2.0.43,<2.1",
   "alembic>=1.16.5,<2",
   "psycopg[binary]>=3.2.10,<4",

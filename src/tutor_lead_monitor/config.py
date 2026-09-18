@@ -31,6 +31,39 @@ class Settings(BaseSettings):
     config_dir: Path = Path("config")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     health_interval_seconds: PositiveInt = 30
+    telegram_bot_token: SecretStr | None = None
+    telegram_allowed_user_ids: SecretStr | None = None
+    telegram_recipient_chat_id: SecretStr | None = None
+
+    def telegram_access(self) -> tuple[str, frozenset[int], int]:
+        """Validate only when Telegram is explicitly started; errors contain no inputs."""
+        try:
+            token = self.telegram_bot_token.get_secret_value() if self.telegram_bot_token else ""
+            users = self.telegram_allowed_user_ids
+            allowed = (
+                frozenset(int(s.strip()) for s in users.get_secret_value().split(","))
+                if users
+                else frozenset()
+            )
+            chat = (
+                int(self.telegram_recipient_chat_id.get_secret_value())
+                if self.telegram_recipient_chat_id
+                else 0
+            )
+            if (
+                not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token)
+                or not allowed
+                or min(allowed) <= 0
+            ):
+                raise ValueError
+            # MVP delivery is a private owner chat, never a group or public channel.
+            if chat not in allowed:
+                raise ValueError
+            return token, allowed, chat
+        except ValueError:
+            raise ConfigError(
+                "Configure Telegram token, positive owner IDs, and an allowlisted private recipient"
+            ) from None
 
     @field_validator("database_url")
     @classmethod
@@ -56,8 +89,8 @@ class DeduplicationConfig(StrictModel):
 
 
 class BusinessConfig(StrictModel):
-    timezone: str = "UTC"
-    digest_time: time = time(19)
+    timezone: str = "Europe/Rome"
+    digest_time: time = time(9)
     send_empty_digest: bool = False
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)

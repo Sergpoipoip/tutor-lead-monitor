@@ -37,7 +37,7 @@ class FixtureCollector:
         if dataset not in {"primary", "crosspost"}:
             raise ValueError("Unknown fixture dataset")
         self.dataset = dataset
-        self.texts = TEXTS if dataset == "primary" else CROSSPOST_TEXTS
+        self.texts: tuple[str, ...] = TEXTS if dataset == "primary" else CROSSPOST_TEXTS
 
     async def collect(self, context: CollectionContext) -> AsyncIterator[CollectionPage]:
         offset = (context.cursor or {}).get("offset", 0)

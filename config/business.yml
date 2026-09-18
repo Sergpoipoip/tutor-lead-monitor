@@ -1,5 +1,5 @@
-timezone: UTC
-digest_time: "19:00:00"
+timezone: Europe/Rome
+digest_time: "09:00:00"
 send_empty_digest: false
 retention:
   raw_rejected_days: 30

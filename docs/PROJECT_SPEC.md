@@ -216,6 +216,10 @@ The digest must include:
 
 If there are no eligible leads, send at most one concise “no new leads” message for that day, controlled by configuration.
 
+Confirmed defaults: Europe/Rome timezone, 09:00 local digest time, and
+`send_empty_digest: false`. Milestone 3 exposes explicit delivery commands and long
+polling only; autonomous execution belongs to Milestone 6.
+
 ## 6. Source and compliance policy
 
 Every source must have an explicit registry entry containing:
@@ -275,6 +279,7 @@ Secrets belong in environment variables or an external secret store:
 - `DATABASE_URL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_ALLOWED_USER_IDS`
+- `TELEGRAM_RECIPIENT_CHAT_ID`
 - provider-specific API credentials
 
 Non-secret business configuration belongs in typed settings/YAML:
