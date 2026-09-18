@@ -26,6 +26,7 @@ from tutor_lead_monitor.db.models import (
     Notification,
     NotificationChunk,
     NotificationItem,
+    NotificationMarker,
     RawItem,
 )
 from tutor_lead_monitor.db.repositories import sync_source
@@ -161,8 +162,10 @@ async def test_digest_order_membership_and_immediate_inclusion(
     tie = seed(migrated_engine, config, score=90)
     seed(migrated_engine, config, score=54)
     start, end = day_bounds(NOW.date(), "Europe/Rome")
-    seed(migrated_engine, config, when=start - timedelta(microseconds=1))
-    seed(migrated_engine, config, when=end)
+    outside_stats = [
+        seed(migrated_engine, config, when=start - timedelta(microseconds=1)),
+        seed(migrated_engine, config, when=end),
+    ]
     fake = FakeNotifier()
     await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
     fake.calls.clear()
@@ -171,13 +174,19 @@ async def test_digest_order_membership_and_immediate_inclusion(
     ids = [
         UUID(hex=b.data[2:]) for _, m in fake.calls for b in m.buttons if b.data.startswith("i:")
     ]
-    assert ids == sorted([fresh, tie]) + [old, low]
+    assert ids == sorted(outside_stats) + sorted([fresh, tie]) + [old, low]
     assert "Collected: 5" in fake.calls[0][1].html and "review: 1" in fake.calls[0][1].html
     count = len(fake.calls)
     await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
     assert len(fake.calls) == count
     with Session(migrated_engine) as session:
-        assert set(session.scalars(select(NotificationItem.lead_id))) == {fresh, tie, old, low}
+        assert set(session.scalars(select(NotificationItem.lead_id))) == {
+            fresh,
+            tie,
+            old,
+            low,
+            *outside_stats,
+        }
         assert (
             session.scalar(
                 select(func.count()).select_from(Notification).where(Notification.kind == "digest")
@@ -189,17 +198,25 @@ async def test_digest_order_membership_and_immediate_inclusion(
 @pytest.mark.parametrize(
     "day", [datetime(2026, 3, 29, 10, tzinfo=UTC), datetime(2026, 10, 25, 10, tzinfo=UTC)]
 )
-async def test_digest_dst_boundary_membership(
+async def test_digest_dst_statistics_are_separate_from_backlog(
     migrated_engine: Engine, config: AppConfig, day: datetime
 ) -> None:
     start, end = day_bounds(day.date(), "Europe/Rome")
     first = seed(migrated_engine, config, when=start)
     last = seed(migrated_engine, config, when=end - timedelta(microseconds=1))
-    seed(migrated_engine, config, when=start - timedelta(microseconds=1))
-    seed(migrated_engine, config, when=end)
-    await send_digest(migrated_engine, config, OWNER, FakeNotifier(), day.date(), now=day)
+    earlier = seed(migrated_engine, config, when=start - timedelta(microseconds=1))
+    later = seed(migrated_engine, config, when=end)
+    fake = FakeNotifier()
+    await send_digest(migrated_engine, config, OWNER, fake, day.date(), now=day)
+    assert "Collected: 2" in fake.calls[0][1].html
+    assert "eligible: 4" in fake.calls[0][1].html
     with Session(migrated_engine) as session:
-        assert set(session.scalars(select(NotificationItem.lead_id))) == {first, last}
+        assert set(session.scalars(select(NotificationItem.lead_id))) == {
+            first,
+            last,
+            earlier,
+            later,
+        }
 
 
 async def test_empty_digest_does_not_seal_the_day(
@@ -234,23 +251,32 @@ async def test_digest_partial_failure_resumes_frozen_chunks(
         assert chunks[1].next_attempt_at >= NOW + timedelta(seconds=60)
         snapshots = [chunk.text for chunk in chunks]
     # A later arrival cannot change an already delivered digest's ordering or membership.
-    seed(migrated_engine, config)
+    late = seed(migrated_engine, config)
     await send_digest(
         migrated_engine, config, OWNER, fake, NOW.date(), now=NOW + timedelta(seconds=59)
     )
     assert len(fake.calls) == 2
-    result = await send_digest(
-        migrated_engine, config, OWNER, fake, NOW.date(), now=NOW + timedelta(seconds=61)
-    )
+    tomorrow = NOW + timedelta(days=1)
+    next_digest = FakeNotifier()
+    await send_digest(migrated_engine, config, OWNER, next_digest, tomorrow.date(), now=tomorrow)
+    assert len(next_digest.sent) == 1
+    assert [
+        UUID(hex=b.data[2:])
+        for _, message in next_digest.sent
+        for b in message.buttons
+        if b.data.startswith("i:")
+    ] == [late]
+    result = await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=tomorrow)
     assert result.sent == 1
     assert [message.html for _, message in fake.sent] == snapshots
     await send_digest(
-        migrated_engine, config, OWNER, fake, NOW.date(), now=NOW + timedelta(hours=1)
+        migrated_engine, config, OWNER, fake, NOW.date(), now=tomorrow + timedelta(hours=1)
     )
     assert len(fake.sent) == len(snapshots)
     with Session(migrated_engine) as session:
-        assert session.scalars(select(Notification)).one().id == notification_id
-        assert session.scalar(select(func.count()).select_from(NotificationItem)) == 9
+        assert session.get(Notification, notification_id) is not None
+        assert session.scalar(select(func.count()).select_from(Notification)) == 2
+        assert session.scalar(select(func.count()).select_from(NotificationItem)) == 10
 
 
 @pytest.mark.parametrize("kind", list(FailureKind))
@@ -517,7 +543,13 @@ async def test_retained_lead_keeps_notification_idempotency(
             envelope.created_at = NOW
     future = NOW + timedelta(days=200)
     result = run_retention(migrated_engine, config.business.retention, now=future, dry_run=False)
-    assert result.notifications == result.notification_chunks == 0
+    assert result.notifications == result.notification_chunks == 1
+    with Session(migrated_engine) as session:
+        assert session.get(Lead, lead_id) is not None
+        assert session.scalar(select(func.count()).select_from(Feedback)) == 1
+        assert session.scalar(select(func.count()).select_from(Notification)) == 0
+        assert session.scalar(select(func.count()).select_from(NotificationChunk)) == 0
+        assert session.scalar(select(func.count()).select_from(NotificationMarker)) == 1
     await send_immediate(migrated_engine, config, OWNER, fake, now=future)
     assert len(fake.calls) == 1
 
@@ -561,3 +593,223 @@ def test_cli_delivery_uses_fake_transport_and_is_idempotent(
     output = capsys.readouterr()
     assert "synthetic_token" not in output.out + output.err
     assert "репетитора" not in output.out + output.err
+
+
+async def test_late_arrival_is_delivered_once_in_next_digest(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    nine_rome = NOW.replace(hour=7)  # 09:00 CEST, on the spring DST day.
+    first = seed(migrated_engine, config, when=nine_rome - timedelta(hours=1))
+    fake = FakeNotifier()
+    await send_digest(migrated_engine, config, OWNER, fake, nine_rome.date(), now=nine_rome)
+    frozen = [m.html for _, m in fake.sent]
+    late = seed(migrated_engine, config, when=nine_rome + timedelta(hours=2))
+    await send_digest(
+        migrated_engine, config, OWNER, fake, nine_rome.date(), now=nine_rome + timedelta(hours=3)
+    )
+    assert [m.html for _, m in fake.sent] == frozen
+    tomorrow = nine_rome + timedelta(days=1)
+    await asyncio.gather(
+        *(
+            send_digest(migrated_engine, config, OWNER, fake, tomorrow.date(), now=tomorrow)
+            for _ in range(2)
+        )
+    )
+    await send_digest(
+        migrated_engine,
+        config,
+        OWNER,
+        fake,
+        (tomorrow + timedelta(days=1)).date(),
+        now=tomorrow + timedelta(days=1),
+    )
+    assert len(fake.sent) == 2
+    with Session(migrated_engine) as session:
+        rows = session.execute(
+            select(Notification.period_key, NotificationItem.lead_id).join(NotificationItem)
+        ).all()
+        assert set(rows) == {
+            (nine_rome.date().isoformat(), first),
+            (tomorrow.date().isoformat(), late),
+        }
+        assert len(rows) == 2
+
+
+async def test_old_lead_promoted_across_threshold_enters_backlog(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    review = seed(migrated_engine, config, score=46, when=NOW - timedelta(days=1))
+    fake = FakeNotifier()
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
+    assert not fake.calls
+    tomorrow = NOW + timedelta(days=1)
+    with Session(migrated_engine) as session, session.begin():
+        lead = session.get(Lead, review)
+        assert lead is not None
+        raw = session.get(RawItem, lead.canonical_raw_item_id)
+        assert raw is not None
+        raw.canonical_url = raw.url
+        session.add(
+            RawItem(
+                source_id=raw.source_id,
+                external_id="promoted-occurrence",
+                text="Ищу репетитора по литературе, 10 класс, онлайн",
+                url=raw.url,
+                published_at=tomorrow,
+                collected_at=tomorrow,
+                metadata_={},
+            )
+        )
+    assert process_pending(migrated_engine, config, now=tomorrow).processed == 1
+    await send_digest(migrated_engine, config, OWNER, fake, tomorrow.date(), now=tomorrow)
+    await send_digest(migrated_engine, config, OWNER, fake, tomorrow.date(), now=tomorrow)
+    await send_digest(
+        migrated_engine,
+        config,
+        OWNER,
+        fake,
+        (tomorrow + timedelta(days=1)).date(),
+        now=tomorrow + timedelta(days=1),
+    )
+    assert len(fake.sent) == 1
+    with Session(migrated_engine) as session:
+        lead = session.get(Lead, review)
+        assert lead is not None and lead.score >= 55 and lead.created_at < NOW
+        assert list(session.scalars(select(NotificationItem.lead_id))) == [review]
+
+
+async def test_digest_membership_is_once_per_recipient_not_once_per_day(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    lead_id = seed(migrated_engine, config)
+    fake = FakeNotifier()
+    await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
+    for day in range(3):
+        instant = NOW + timedelta(days=day)
+        for recipient in (OWNER, OWNER + 1):
+            await send_digest(migrated_engine, config, recipient, fake, instant.date(), now=instant)
+    assert len(fake.sent) == 3  # Immediate plus one digest for each recipient.
+    with Session(migrated_engine) as session:
+        rows = session.execute(
+            select(Notification.recipient_key, NotificationItem.lead_id).join(NotificationItem)
+        ).all()
+        assert set(rows) == {(str(OWNER), lead_id), (str(OWNER + 1), lead_id)} and len(rows) == 2
+
+
+@pytest.mark.parametrize("status", ["pending", "sending", "failed", "sent", "skipped"])
+async def test_expired_digest_payload_removed_but_feedback_and_dedup_survive(
+    migrated_engine: Engine, config: AppConfig, status: str
+) -> None:
+    lead_id = seed(migrated_engine, config, content="payload-contact-sentinel")
+    fake = FakeNotifier()
+    await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
+    await callback(
+        migrated_engine,
+        ACCESS,
+        fake,
+        actor=OWNER,
+        chat=OWNER,
+        callback_id="protected",
+        data=f"i:{lead_id.hex}",
+    )
+    with Session(migrated_engine) as session, session.begin():
+        for envelope in session.scalars(select(Notification)):
+            envelope.created_at = NOW
+            envelope.status = status
+    future = NOW + timedelta(days=config.business.retention.notifications_days, seconds=1)
+    preview = run_retention(migrated_engine, config.business.retention, now=future)
+    assert preview.notifications == preview.notification_chunks == 2
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(NotificationMarker)) == 0
+    result = run_retention(migrated_engine, config.business.retention, now=future, dry_run=False)
+    assert result.notifications == 2 and result.notification_items == 1
+    with Session(migrated_engine) as session:
+        assert session.get(Lead, lead_id) is not None
+        assert session.scalar(select(func.count()).select_from(Feedback)) == 1
+        assert session.scalar(select(func.count()).select_from(RawItem)) == 1
+        for model in (Notification, NotificationItem, NotificationChunk):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+        markers = session.scalars(select(NotificationMarker)).all()
+        assert {m.kind for m in markers} == {"immediate", "digest", "digest_period"}
+        assert all(len(m.recipient_hash) == 64 and m.recipient_hash != str(OWNER) for m in markers)
+        assert set(NotificationMarker.__table__.columns.keys()) == {
+            "recipient_hash",
+            "kind",
+            "scope_key",
+        }
+    before = len(fake.calls)
+    await send_immediate(migrated_engine, config, OWNER, fake, now=future)
+    await send_digest(migrated_engine, config, OWNER, fake, future.date(), now=future)
+    assert len(fake.calls) == before
+    new_lead = seed(migrated_engine, config, when=future)
+    # The expired period itself cannot be reopened, even with new eligible leads.
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=future)
+    assert len(fake.calls) == before
+    await send_digest(migrated_engine, config, OWNER, fake, future.date(), now=future)
+    with Session(migrated_engine) as session:
+        assert list(session.scalars(select(NotificationItem.lead_id))) == [new_lead]
+
+
+async def test_retention_defers_only_active_recipient_and_expires_at_configured_boundary(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    from tutor_lead_monitor.db.locks import source_lock
+
+    seed(migrated_engine, config)
+    await send_digest(migrated_engine, config, OWNER, FakeNotifier(), NOW.date(), now=NOW)
+    with Session(migrated_engine) as session, session.begin():
+        envelope = session.scalars(select(Notification)).one()
+        envelope.created_at = NOW
+    retention = config.business.retention.model_copy(update={"notifications_days": 2})
+    boundary = NOW + timedelta(days=2)
+    assert run_retention(migrated_engine, retention, now=boundary).notifications == 0
+    with source_lock(migrated_engine, f"delivery:{OWNER}"):
+        assert (
+            run_retention(
+                migrated_engine, retention, now=boundary + timedelta(seconds=1), dry_run=False
+            ).notifications
+            == 0
+        )
+    assert (
+        run_retention(
+            migrated_engine, retention, now=boundary + timedelta(seconds=1), dry_run=False
+        ).notifications
+        == 1
+    )
+
+
+async def test_lead_markers_expire_with_lead_but_period_stays_sealed(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    lead_id = seed(migrated_engine, config)
+    fake = FakeNotifier()
+    await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
+    future = NOW + timedelta(days=config.business.retention.notifications_days, seconds=1)
+    with Session(migrated_engine) as session, session.begin():
+        for envelope in session.scalars(select(Notification)):
+            envelope.created_at = NOW
+        lead = session.get(Lead, lead_id)
+        assert lead is not None
+        lead.last_seen_at = future  # Still-recent evidence keeps this lead, without feedback.
+    run_retention(migrated_engine, config.business.retention, now=future, dry_run=False)
+    with Session(migrated_engine) as session:
+        assert session.get(Lead, lead_id) is not None
+        assert session.scalar(select(func.count()).select_from(NotificationMarker)) == 3
+    after_lead_expiry = future + timedelta(days=config.business.retention.leads_days, seconds=1)
+    result = run_retention(
+        migrated_engine, config.business.retention, now=after_lead_expiry, dry_run=False
+    )
+    assert result.leads == 1
+    with Session(migrated_engine) as session:
+        assert session.get(Lead, lead_id) is None
+        assert session.scalars(select(NotificationMarker)).one().kind == "digest_period"
+    seed(migrated_engine, config, when=after_lead_expiry)
+    before = len(fake.calls)
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=after_lead_expiry)
+    assert len(fake.calls) == before
+    await send_digest(
+        migrated_engine, config, OWNER, fake, after_lead_expiry.date(), now=after_lead_expiry
+    )
+    assert len(fake.calls) == before + 1

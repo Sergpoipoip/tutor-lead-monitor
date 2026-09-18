@@ -74,7 +74,7 @@ def test_retention_dry_run_apply_and_protected_evidence(migrated_engine: Engine)
                 kind="immediate",
                 recipient_key="synthetic",
                 status="pending",
-                created_at=NOW - timedelta(days=200),
+                created_at=NOW - timedelta(days=10),
             )
         )
         session.add_all(

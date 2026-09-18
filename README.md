@@ -231,19 +231,25 @@ uv run tutor-lead-monitor retention --apply
 
 Dry run is the default and reports the same selection counts without deleting.
 Defaults: rejected raw records 30 days, leads/occurrences 90 days since last seen,
-terminal notifications and finished collection-run metrics 180 days. Cutoffs are
+notifications (all statuses) and finished collection-run metrics 180 days. Cutoffs are
 strictly older-than; boundary records remain. Source retention can shorten the
 period for unreferenced processed/rejected raw records.
 
-Deletion is explicit and ordered: notification membership, expired terminal
-notifications, occurrences, leads, unreferenced raw items, finished runs. Feedback
-is never deleted. Feedback-linked leads and their raw evidence remain, as do leads
-referenced by retained notifications. Pending/sending notifications, pending/failed
-raw items, active runs, sources, and cursors remain for diagnosis or future work.
-Dependencies can therefore extend retention beyond its nominal period.
+Deletion is explicit and ordered: expired notification chunks, membership,
+envelopes, occurrences, leads, unreferenced raw items, finished runs. Notification
+age is measured from the envelope's `created_at`, including pending/failed sends.
+Feedback is never deleted. Feedback-linked leads and their raw evidence remain, as
+do leads referenced by unexpired notifications. Feedback never extends retention
+of notification text, buttons, membership, or envelopes. Pending/failed raw items,
+active runs, sources, and cursors remain for diagnosis or future work.
 
 Retention holds an exclusive maintenance advisory lock; collection pages and
-processing transactions take its shared counterpart. Notification and feedback writers use the same gate. No broad cascade deletion is used.
+processing transactions take its shared counterpart. Notification and feedback
+writers use the same gate. A nonblocking recipient lock defers deletion only while
+a sender owns that lock (including its bounded network request); rerun retention
+after the send finishes. Stored pending/sending status alone does not defer expiry.
+No broad cascade deletion is used. Payload-free replay markers are described below;
+dry runs neither create markers nor delete records.
 
 ## Containers, migrations, and CI
 
@@ -336,6 +342,9 @@ uv run tutor-lead-monitor send-digest --local-date 2026-09-18
 Migration `7d8905a1ece6` adds recipient pause state, frozen notification chunks and
 callback receipts. Existing evidence and constraints are preserved. Downgrading
 removes this new delivery state and is for disposable data or reviewed rollback only.
+Migration `b35778628004` adds payload-free notification replay markers without
+changing existing membership or chunks. Downgrading it discards expired-notification
+replay protection and requires the same rollback review.
 Compose passes optional Telegram variables into containers; `serve` remains the
 health lifecycle and does not start the bot or a scheduler.
 
@@ -353,15 +362,27 @@ busy and must be retried. Collection and processing continue.
 
 ### Digest and feedback semantics
 
-A digest includes active leads discovered (`leads.created_at`) within the requested
-local date, including already-alerted leads. Ordering is score, canonical publication
-or collection freshness, then UUID. Rome midnight boundaries correctly span 23/25
-hours on DST days. Statistics include collected/rejected raw items, new leads, and
-immediate/digest/review band counts.
+A digest includes all currently active leads at or above the digest threshold that
+have never been reserved in a digest for that recipient. Selection checks prior
+`NotificationItem` membership across all periods and statuses, plus replay markers
+after notification expiry. Lead creation date does not restrict eligibility.
+Immediate-alert history is independent: an already-alerted lead can appear in one
+digest. Ordering is score descending, canonical publication or collection freshness
+descending, then UUID ascending.
+
+Statistics use the requested local calendar day, from midnight inclusive to the
+next midnight exclusive, converted independently to UTC (23/25 hours on Rome DST
+days). Collected/rejected counts use raw collection time; new-lead and score-band
+counts use lead creation time and current state at the snapshot. These statistics
+are frozen with the envelope; they describe that reporting day, while the cards
+may include older backlog. Requesting a historical date does not reconstruct
+historical eligibility or state.
 
 The first nonempty request freezes membership and chunks. Repeated requests resume
-delivery or return the existing result. Later arrivals are not appended; choose
-the requested date and execution time deliberately during local operation. No empty
+delivery or return the existing result. Later arrivals and leads promoted from
+review to digest eligibility enter the next new period's digest, even if originally
+created on an earlier date. Membership in an unfinished digest stays reserved for
+that envelope's retry, rather than being copied into a later digest. No empty
 message or envelope is created with `send_empty_digest: false`, so a later nonempty
 request still works. Thresholds are review 45, digest 55, immediate 90.
 
@@ -391,10 +412,24 @@ notification/chunk IDs before targeted database repair; do not blindly reset the
 A crash after sending but before recording success has the same ambiguity.
 Errors/logs contain safe categories, never updates, tokens, contacts or post bodies.
 
-Frozen chunks contain the authorized excerpt and share notification retention.
-Retention explicitly deletes chunks before envelopes; envelopes for retained leads
-remain as idempotency evidence. Callback receipts remain with feedback and must be
-explicitly deleted before manually deleting the corresponding feedback.
+Frozen chunks contain the authorized excerpt and expire with their envelope after
+the configured notification retention period (default 180 days). Retention removes
+chunks, text, buttons, membership, envelopes, and delivery metadata even when
+feedback protects the lead and raw evidence. Retry unfinished delivery within that
+window: expired reservations, including failed or uncertain sends, are consumed
+and cannot be reopened or automatically replaced.
+
+Before deleting an expired envelope, the same transaction writes only replay keys
+to `notification_markers`: a SHA-256 recipient hash, kind, and either an internal
+lead UUID or SHA-256 digest-period hash. There are no post texts, URLs, contacts,
+message bodies, provider message IDs, timestamps, or aggregated metrics. Immediate
+and digest lead keys remain while their lead remains and are removed when retention
+deletes that lead. Digest-period keys remain until explicit manual recipient erasure,
+so rerunning an expired period cannot create another envelope even after its leads
+are deleted. These keys are replay protection, not retained notification history.
+Manual erasure must remove the corresponding keys as well; erasing keys loses that
+replay protection. Callback receipts remain with feedback and must be explicitly
+deleted before manually deleting the corresponding feedback.
 
 Tests block real Telegram transport calls. The full suite covers fake transport
 retries, concurrent sends, DST, callbacks, persistent pause and migration drift.

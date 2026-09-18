@@ -326,6 +326,10 @@ Idempotency constraints:
   ID and sent timestamp. `ambiguous` identifies uncertain sends.
 - `callback_receipts`: callback ID primary key and feedback foreign key; replaying
   an old callback cannot undo newer feedback.
+- `notification_markers`: composite key of `recipient_hash` (SHA-256), `kind`
+  (`immediate`, `digest`, `digest_period`), and `scope_key` (internal lead UUID for
+  lead kinds, SHA-256 period hash otherwise). No payload, URL, contact information,
+  provider message ID, timestamps, or aggregated metrics are stored.
 
 Recipient session advisory locks serialize reservation and delivery across workers.
 Transactions finish before network calls. Successfully sent chunks are never resent.
@@ -334,15 +338,53 @@ with persisted exponential backoff, jitter and retry-after. Timeouts and interru
 sends require manual review: Telegram sendMessage has no caller idempotency key.
 
 Digest membership freezes on the first nonempty request for a recipient/local date,
-using leads discovered (`created_at`) that day. Rome midnight boundaries convert
-independently to UTC for DST. Immediate-alert leads remain eligible. Explicit
-/digest and CLI send-digest are allowed while paused; immediate delivery is not.
+using all currently active leads meeting the digest threshold, regardless of
+`leads.created_at`. Exclude recipient-specific prior `NotificationItem` membership
+across every digest period/status and expired digest lead markers. Immediate-alert
+history does not exclude a lead from its one digest. Sort by score descending,
+canonical publication/collection freshness descending, then UUID ascending.
+Later arrivals and later promotions across the threshold enter the next new
+period's digest. Reserved membership in unfinished envelopes remains attached to
+those immutable envelopes/chunks for resumption; subsequent periods cannot copy it.
+An existing envelope resumes unchanged; an expired period marker prevents reopening
+that period. Recipient locks serialize these checks with reservation and sending.
+
+Digest statistics report the requested local calendar day, midnight inclusive to
+next midnight exclusive. Boundaries convert independently to UTC for DST. Raw
+collection timestamps determine collected/rejected counts; lead creation timestamps
+determine new-lead and score-band counts, using current state at the frozen snapshot.
+The backlog of cards can be older than this reporting window. Historical-date
+execution does not reconstruct historical eligibility or statistics. Explicit
+`/digest` and CLI `send-digest` are allowed while paused; immediate delivery is not.
 Empty digests create no envelope when send_empty_digest is false.
 
 Feedback retains changed choices; consecutive identical choices are no-ops and
 new changed choices set lead status. Receipts deduplicate old callbacks. Scores and
-reasons never change through feedback. Retention explicitly deletes chunks before
-envelopes and retains idempotency envelopes for retained leads.
+reasons never change through feedback. Feedback and its required lead/raw evidence
+remain until manually deleted. They never extend notification payload retention.
+
+Notification expiry uses envelope `created_at` and the configured notification
+retention (default 180 days), for every status. In one transaction retention writes
+payload-free replay markers, then deletes frozen chunks (including text/buttons),
+membership, and envelopes. Finished collection-run metrics use the same configured
+period. Lead markers preserve immediate and digest replay protection while the lead
+remains, and are removed when retention deletes that lead. Digest-period markers
+remain until explicit manual recipient erasure, preventing recreation of old periods
+even after lead deletion. Manual erasure must also remove applicable markers and
+loses their replay protection. Markers store neither notification history nor metrics.
+Expired unfinished/failed/uncertain reservations are also consumed: retry/resume is
+available only within notification retention, without automatic replacement afterward.
+Callback receipts remain attached to manually retained feedback.
+
+Retention holds the exclusive maintenance gate and attempts each recipient's delivery
+advisory lock without waiting. It defers that recipient only while a sender owns
+the lock, including bounded network I/O; the next retention invocation can expire
+it after release. Nonblocking acquisition avoids deadlock with a sender waiting on
+the maintenance gate to record its response. Stored pending status is no exemption.
+Dry runs perform no marker writes or deletions. Migration `b35778628004` introduces
+the marker table; it leaves existing frozen history intact and needs no backfill
+because membership/envelopes continue to protect delivery until expiry. Downgrading
+removes marker replay protection and requires reviewed rollback.
 
 ## 7. Transactions and idempotency
 
@@ -483,8 +525,9 @@ processing explanation; do not recover historical fuzzy matches automatically.
 
 ### `send_daily_digest(local_date)`
 
-- computes the UTC boundaries for the configured timezone;
-- selects eligible new leads not already included in that period’s digest;
+- computes UTC boundaries for calendar-day reporting statistics in the configured timezone;
+- selects all eligible leads without prior digest membership for that recipient,
+  including leads created earlier and excluding expired reservation markers;
 - creates an idempotent digest envelope and membership records;
 - sends chunks in deterministic order.
 

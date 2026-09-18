@@ -273,3 +273,23 @@ class CallbackReceipt(Base):
 
     callback_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     feedback_id: Mapped[UUID] = mapped_column(ForeignKey("feedback.id"))
+
+
+class NotificationMarker(Base):
+    """Payload-free reservation tombstones after notification retention expires."""
+
+    __tablename__ = "notification_markers"
+    __table_args__ = (
+        CheckConstraint("kind IN ('immediate','digest','digest_period')", name="kind"),
+        CheckConstraint("recipient_hash ~ '^[0-9a-f]{64}$'", name="recipient_hash"),
+        CheckConstraint(
+            "(kind = 'digest_period' AND scope_key ~ '^[0-9a-f]{64}$') OR "
+            "(kind IN ('immediate','digest') AND "
+            "scope_key ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')",
+            name="scope_key",
+        ),
+    )
+
+    recipient_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -3,11 +3,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from pydantic import TypeAdapter
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, select, text
 from sqlalchemy.orm import Session
 
 from tutor_lead_monitor.config import PositiveInt, RetentionConfig
-from tutor_lead_monitor.db.locks import MAINTENANCE, transaction_lock
+from tutor_lead_monitor.db.locks import MAINTENANCE, lock_key, transaction_lock
 from tutor_lead_monitor.db.models import (
     CollectionRun,
     Feedback,
@@ -16,9 +16,11 @@ from tutor_lead_monitor.db.models import (
     Notification,
     NotificationChunk,
     NotificationItem,
+    NotificationMarker,
     RawItem,
     Source,
 )
+from tutor_lead_monitor.db.notification_markers import preserve_expired_keys
 from tutor_lead_monitor.domain.models import utc
 
 
@@ -41,14 +43,24 @@ def run_retention(
     with Session(engine) as session, session.begin():
         # Cooperating ingestion/processing transactions hold the shared counterpart.
         transaction_lock(session, MAINTENANCE)
-        notification_ids = set(
-            session.scalars(
-                select(Notification.id).where(
-                    Notification.created_at < instant - timedelta(days=config.notifications_days),
-                    Notification.status.in_(["sent", "failed", "skipped"]),
-                )
+        expired = session.execute(
+            select(Notification.id, Notification.recipient_key).where(
+                Notification.created_at < instant - timedelta(days=config.notifications_days)
             )
-        )
+        ).all()
+        # A sender owns this session lock across network I/O. Never block here:
+        # it may be waiting on our maintenance gate to commit its response.
+        idle_recipients = {
+            recipient
+            for recipient in sorted({recipient for _, recipient in expired})
+            if session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:key)"),
+                {"key": lock_key(f"tlm:source:delivery:{recipient}")},
+            )
+        }
+        notification_ids = {
+            record_id for record_id, recipient in expired if recipient in idle_recipients
+        }
         protected: set[UUID] = set(session.scalars(select(Feedback.lead_id)))
         protected.update(
             session.scalars(
@@ -64,40 +76,6 @@ def run_retention(
                 )
             )
         )
-        # Keep idempotency envelopes for retained leads, including feedback-protected leads.
-        # Digest envelopes link several leads, so preserve their dependency closure too.
-        protected.update(
-            session.scalars(
-                select(Lead.id).where(
-                    Lead.last_seen_at >= instant - timedelta(days=config.leads_days)
-                )
-            )
-        )
-        links = list(
-            session.execute(
-                select(Notification.id, Notification.lead_id).where(
-                    Notification.lead_id.is_not(None)
-                )
-            ).tuples()
-        )
-        links.extend(
-            session.execute(
-                select(NotificationItem.notification_id, NotificationItem.lead_id)
-            ).tuples()
-        )
-        while True:
-            keep_envelopes = {
-                notification_id for notification_id, lead_id in links if lead_id in protected
-            }
-            notification_ids.difference_update(keep_envelopes)
-            expanded = {
-                lead_id
-                for notification_id, lead_id in links
-                if notification_id not in notification_ids and lead_id is not None
-            }
-            if expanded <= protected:
-                break
-            protected.update(expanded)
         lead_ids = set(
             session.scalars(
                 select(Lead.id).where(
@@ -168,6 +146,7 @@ def run_retention(
             ),
         )
         if not dry_run:
+            preserve_expired_keys(session, notification_ids)
             session.execute(
                 delete(NotificationChunk).where(
                     NotificationChunk.notification_id.in_(notification_ids)
@@ -181,6 +160,12 @@ def run_retention(
             )
             session.execute(delete(Notification).where(Notification.id.in_(notification_ids)))
             session.execute(delete(LeadOccurrence).where(LeadOccurrence.lead_id.in_(lead_ids)))
+            session.execute(
+                delete(NotificationMarker).where(
+                    NotificationMarker.kind.in_(["immediate", "digest"]),
+                    NotificationMarker.scope_key.in_([str(lead_id) for lead_id in lead_ids]),
+                )
+            )
             session.execute(delete(Lead).where(Lead.id.in_(lead_ids)))
             session.execute(delete(RawItem).where(RawItem.id.in_(raw_ids)))
             session.execute(delete(CollectionRun).where(CollectionRun.id.in_(run_ids)))

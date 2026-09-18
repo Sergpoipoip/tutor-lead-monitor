@@ -19,6 +19,7 @@ from tutor_lead_monitor.db.models import (
     RecipientState,
     Source,
 )
+from tutor_lead_monitor.db.notification_markers import marked_lead, marked_period
 from tutor_lead_monitor.domain.models import JSONValue
 from tutor_lead_monitor.notifications.base import (
     Button,
@@ -100,6 +101,7 @@ def reserve_immediate(
             .where(
                 Lead.score >= config.scoring.thresholds.immediate,
                 Lead.status.in_(ACTIVE),
+                ~marked_lead(str(recipient), "immediate"),
                 ~select(Notification.id)
                 .where(
                     Notification.lead_id == Lead.id,
@@ -138,15 +140,24 @@ def reserve_digest(
         )
         if existing:
             return existing.id
+        if marked_period(session, str(recipient), day.isoformat()):
+            return None
         rows = session.execute(
             select(Lead, RawItem, Source)
             .join(RawItem, Lead.canonical_raw_item_id == RawItem.id)
             .join(Source, RawItem.source_id == Source.id)
             .where(
-                Lead.created_at >= start,
-                Lead.created_at < end,
                 Lead.score >= config.scoring.thresholds.digest,
                 Lead.status.in_(ACTIVE),
+                ~select(NotificationItem.lead_id)
+                .join(Notification, NotificationItem.notification_id == Notification.id)
+                .where(
+                    NotificationItem.lead_id == Lead.id,
+                    Notification.recipient_key == str(recipient),
+                    Notification.kind == "digest",
+                )
+                .exists(),
+                ~marked_lead(str(recipient), "digest"),
             )
             .order_by(
                 Lead.score.desc(),
@@ -189,6 +200,7 @@ def reserve_digest(
         )
         header = (
             f"Digest {day} · {config.business.timezone}\n"
+            f"Statistics: local calendar day {day} (snapshot)\n"
             f"Collected: {raw_count}; rejected: {rejected}; new leads: {len(scores)}\n"
             f"Immediate: {bands[0]}; digest: {bands[1]}; review: {bands[2]}; eligible: {len(rows)}"
         )
