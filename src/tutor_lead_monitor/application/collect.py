@@ -33,12 +33,8 @@ async def run_collector(
         raise ValueError("Collector must match an enabled approved source")
     if config.kind not in {"fixture", "web_search"}:
         raise ValueError("Unsupported collector kind")
+    config.check_authorization()
     now = datetime.now(UTC)
-    if (
-        config.operations.authorization_expires_at is not None
-        and config.operations.authorization_expires_at <= now
-    ):
-        raise ValueError("Source authorization has expired")
     run_id = uuid4()
     with source_lock(engine, config.key) as connection:
         with Session(connection) as session, session.begin():

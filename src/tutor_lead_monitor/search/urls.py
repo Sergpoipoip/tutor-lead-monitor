@@ -20,19 +20,20 @@ def public_url(value: str) -> str | None:
         try:
             address = ipaddress.ip_address(host)
         except ValueError:
+            host = host.removesuffix(".")
             if (
                 "." not in host
                 or len(host) > 253
-                or host.rstrip(".") in {"localhost", "local", "internal", "test"}
+                or host in {"localhost", "local", "internal", "test"}
                 or all(char.isdigit() or char == "." for char in host)
-                or host.rstrip(".").endswith((".localhost", ".local", ".internal", ".test"))
+                or host.endswith((".localhost", ".local", ".internal", ".test"))
                 or any(
                     not label
                     or len(label) > 63
                     or label.startswith("-")
                     or label.endswith("-")
                     or not all(char.isascii() and (char.isalnum() or char == "-") for char in label)
-                    for label in host.rstrip(".").split(".")
+                    for label in host.split(".")
                 )
             ):
                 return None

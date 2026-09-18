@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 import httpx
 
 from tutor_lead_monitor.collectors.base import Collector
@@ -24,9 +22,7 @@ def build_collector(
 ) -> Collector:
     if not source.enabled or source.policy_status != "approved":
         raise ValueError("Source must be enabled and approved")
-    expiry = source.operations.authorization_expires_at
-    if expiry is not None and expiry <= datetime.now(UTC):
-        raise ValueError("Source authorization has expired")
+    source.check_authorization()
     if source.kind == "fixture":
         options = FixtureOptions.model_validate(source.config)
         return FixtureCollector(source.key, options.page_size, options.dataset)

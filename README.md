@@ -212,6 +212,14 @@ enabled sources, unsupported enabled collectors, invalid Yandex options, query
 references and request budgets. Never place secrets or folder identifiers in YAML or
 metadata. Telegram commands additionally validate secret settings and the owner allowlist.
 
+Enabled real sources also require a nonblank `policy.reviewer` (whitespace
+normalized, at most 160 printable characters) and timezone-aware `policy.reviewed_at`
+(normalized to UTC). Expired authorization fails validation and collection. These
+checks run again at collector construction and execution. Fixtures need no review
+metadata; disabled/pending real sources can keep reviewer/date null. Registry
+`owner` names the person or project responsible for reviewing and disabling the
+integration; it does not name the external provider.
+
 Every source requires `operations`: positive `freshness_sla_seconds` and
 `pause_after_consecutive_failures`, a non-empty `quota_policy`, and optional
 `authorization_expires_at`. Expiry must be timezone-aware and is normalized to UTC;
@@ -491,8 +499,10 @@ Each explicit run revisits top results with no advancing cursor. Canonical-URL
 SHA-256 IDs and database uniqueness prevent duplicate raw inserts across queries
 and runs. Fragments/tracking keys are removed for identity, while meaningful URL
 parameters remain. The first occurrence stays immutable, so later snippets for
-the same URL do not overwrite evidence. A partial run preserves completed pages;
-repeating it can repeat billed requests. Rate-limit/server errors with a valid
+the same URL do not overwrite evidence. A single trailing DNS hostname dot is
+removed for canonical identity; path/query encoding and meaningful parameters stay
+intact. Existing raw evidence and frozen notifications are not rewritten. A partial
+run preserves completed pages; repeating it can repeat billed requests. Rate-limit/server errors with a valid
 bounded Retry-After set a stored source pause (up to 300 seconds). Persistent failures
 need manual review; no scheduling or threshold-based automatic pausing is added.
 
@@ -505,6 +515,10 @@ Before the first live request:
    protected environment variables. Use the secret key, not its ID. Neither value
    belongs in YAML, shell command text, logs or database metadata. Unrelated commands
    work without them. Compose passes these optional variables to application services.
+   Lazy checks reject empty/missing values, known placeholders, whitespace and control
+   characters. API keys allow printable ASCII up to 4,096 characters (a local header
+   safety limit); folder IDs allow printable JSON strings up to the REST limit of
+   50 characters. No exact credential format is assumed. Errors never echo values.
 3. Complete the source's policy reviewer/date/notes and authorization expiry as
    applicable. Only after your review, set `policy_status: approved` and `enabled: true`.
    For the smoke test select `[seek_tutor]`, `max_requests_per_run: 1`, and

@@ -213,7 +213,12 @@ it never imports classification, deduplication or delivery. The explicit factory
 `collectors/factory.py` supports fixture and Yandex web search, failing closed for
 unsupported collectors. Both CLI `collect` and `pipeline` use it. Configuration,
 enabled/approved/expiry gates and lazy credential validation precede provider use;
-the existing orchestration also checks stored source state and pauses under its
+enabled non-fixture sources additionally require a nonblank reviewer (normalized
+whitespace, at most 160 printable characters) and an aware review timestamp stored
+in UTC. Configuration validation, factory construction and collection execution
+check authorization; expiry is rechecked at runtime. Disabled/pending sources may
+retain null review fields, and fixtures require no review metadata.
+The existing orchestration also checks stored source state and pauses under its
 per-source advisory lock. Disabled Yandex remains safe to register with `sync-sources`.
 
 The versioned `queries.yml` catalog contains executable strings and group IDs.
@@ -225,7 +230,8 @@ pages. No retries or scheduler are added; a valid bounded Retry-After creates a
 stored pause so immediate manual reruns respect provider backoff.
 
 Search URL identity uses a conservative public-URL canonicalizer, preserving
-meaningful query ordering/encoding/parameters. External IDs are its SHA-256 hash;
+meaningful query ordering/encoding/parameters and removing one DNS hostname trailing
+dot. External IDs are its SHA-256 hash;
 database source/external-ID uniqueness preserves the first raw evidence across
 query/run repetition. Original URLs remain in raw records. Processing and Telegram
 links use this canonicalizer for search snippets, leaving fixture behavior intact.
@@ -237,6 +243,10 @@ UTC. New Telegram views label snippets in Russian, without rewriting frozen chun
 Existing source, raw-item, cursor and run tables support this contract; there is no
 new migration. Credentials/folder IDs never enter registry JSON, logs or exceptions.
 The API-key and folder settings are redacted and excluded from settings serialization.
+Lazy credential checks reject missing/empty values, placeholders, whitespace and
+controls. API keys allow printable ASCII up to a local header cap of 4,096 characters;
+folder IDs allow printable JSON strings up to the documented 50-character limit.
+There are no assumptions about exact lengths, prefixes or alphanumeric formats.
 HTTP transports are mocked in tests, with a guard against all real HTTP. Collection,
 processing and delivery remain explicit manual operations, with production scheduling
 and deployment reserved for Milestone 6.

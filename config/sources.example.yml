@@ -28,7 +28,7 @@ sources:
   - key: yandex_web_search
     kind: web_search
     display_name: Яндекс — фрагменты поисковой выдачи
-    owner: Yandex Cloud / Yandex AI Studio
+    owner: Project owner
     enabled: false
     policy_status: pending
     access_method: official_api

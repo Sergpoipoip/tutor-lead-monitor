@@ -43,6 +43,7 @@ sources:
   - key: telegram_authorized_channel_example
     kind: telegram_bot_updates
     display_name: Authorized Telegram channel
+    owner: Project owner
     enabled: false
     policy_status: pending
     access_method: authorized_bot
@@ -68,6 +69,8 @@ Required fields:
 - `key`
 - `kind`
 - `display_name`
+- `owner` — the operational person or project responsible for reviewing and
+  disabling the integration, not the external API provider
 - `enabled`
 - `policy_status`
 - `access_method`
@@ -80,6 +83,15 @@ Required fields:
 - retention period
 
 An enabled source with `policy_status != approved` must fail configuration validation.
+Enabled non-fixture sources also require a nonblank `policy.reviewer` and a
+timezone-aware `policy.reviewed_at`, normalized to UTC. Reviewer whitespace is
+collapsed and trimmed; the resulting printable label is limited to 160 characters.
+Authorization expiry, when present, must still be in the future. Validation and
+collection entry points enforce these checks with generic errors. Fixtures do not
+require review metadata. Disabled/pending real sources may keep both fields null.
+
+For `yandex_web_search`, `owner: Project owner` identifies operational responsibility;
+`config.provider: yandex` and the display name identify the external provider.
 
 ## 5. Query strategy
 
@@ -511,6 +523,16 @@ opt-out is sent on every request; it is not permission to retain third-party con
 locally. The owner must still review applicable service terms and result-retention
 rights. Provider fields can be missing or change without notice.
 
+Credential validation is lazy and checks boundaries, not undocumented token formats.
+Both values must be present, nonempty and free of whitespace/control characters;
+recognized placeholders (`REPLACE_*`, `YOUR_*`, `changeme`, `placeholder`, `<...>`
+and `${...}` forms) fail. The API key must be printable ASCII, with a local safety
+cap of 4,096 characters for the HTTP header. The folder ID is a printable JSON
+string of at most 50 characters, matching the REST contract's length limit; JSON
+serialization handles quotes and other printable characters. These checks do not
+prove provider authorization. Both values remain `SecretStr`, excluded from settings
+serialization and never echoed in errors or logs.
+
 The reviewed REST schema specifies `period: PERIOD_2_WEEKS`; the conceptual guide
 also describes `resultsWithin` with different enum names. This implementation follows
 the REST schema, not the alternate conceptual spelling. The owner's first live
@@ -548,7 +570,9 @@ each enablement. Requests returning no useful leads can still incur costs.
 
 Only result URL, title and passages become evidence. Original URL is retained;
 identity canonicalization strips fragments and recognized tracking keys, preserving
-other query parameters, their order and encoding (including `ref`). Private/local
+other query parameters, their order and encoding (including `ref`). A single DNS
+hostname trailing dot is removed for canonical URL and external-ID identity.
+Existing raw evidence and frozen notification snapshots are not rewritten. Private/local
 literal URLs and unusable links are ignored, without DNS lookups or destination
 requests. Up to 4,096 characters of title/passages are retained, with bounded
 query-group/rank/domain/provider/snippet metadata. No raw response or query text is

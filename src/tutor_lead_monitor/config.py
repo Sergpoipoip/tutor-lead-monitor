@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import Annotated, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -15,6 +15,21 @@ from tutor_lead_monitor.domain.models import JSONValue, utc
 
 PositiveInt = Annotated[int, Field(gt=0)]
 Score = Annotated[int, Field(ge=0, le=100)]
+
+
+def _valid_yandex_secret(value: SecretStr | None, *, maximum: int, header: bool) -> bool:
+    if value is None:
+        return False
+    text = value.get_secret_value()
+    if not 1 <= len(text) <= maximum or not text.isprintable() or any(c.isspace() for c in text):
+        return False
+    if header and not text.isascii():
+        return False
+    placeholder = text.casefold().replace("-", "_")
+    return not (
+        placeholder.startswith(("replace_", "your_", "${", "<"))
+        or placeholder in {"changeme", "change_me", "placeholder", "replace", "replace_me"}
+    )
 
 
 class ConfigError(ValueError):
@@ -41,11 +56,10 @@ class Settings(BaseSettings):
     def yandex_access(self) -> tuple[SecretStr, SecretStr]:
         key, folder = self.yandex_search_api_key, self.yandex_search_folder_id
         if (
-            key is None
+            not _valid_yandex_secret(key, maximum=4096, header=True)
+            or not _valid_yandex_secret(folder, maximum=50, header=False)
+            or key is None
             or folder is None
-            or not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", key.get_secret_value())
-            or not re.fullmatch(r"[a-z0-9]{20}", folder.get_secret_value())
-            or key.get_secret_value().startswith("REPLACE_")
         ):
             raise ConfigError("Configure valid Yandex Search credentials")
         return key, folder
@@ -218,6 +232,16 @@ class SourcePolicy(StrictModel):
     reviewer: str | None = None
     notes: str = ""
 
+    @field_validator("reviewer")
+    @classmethod
+    def normalized_reviewer(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if not value or len(value) > 160 or not value.isprintable():
+            raise ValueError("Reviewer must be nonblank and at most 160 printable characters")
+        return value
+
     @field_validator("reviewed_at")
     @classmethod
     def utc_review_time(cls, value: datetime | None) -> datetime | None:
@@ -261,6 +285,8 @@ class SourceConfig(StrictModel):
             raise ValueError("Enabled sources require approved policy")
         if self.enabled and self.kind not in {"fixture", "web_search"}:
             raise ValueError("Unsupported collector kind")
+        if self.enabled and self.kind != "fixture":
+            self.check_authorization()
         if self.kind == "fixture":
             if self.access_method != "fixture":
                 raise ValueError("Fixture source requires fixture access method")
@@ -273,6 +299,20 @@ class SourceConfig(StrictModel):
                 raise ValueError("Yandex requires official_api and its credential environment name")
             WebSearchOptions.model_validate(self.config)
         return self
+
+    def check_authorization(self) -> None:
+        """Recheck at execution too: approvals can change and authorization can expire."""
+        if self.kind != "fixture":
+            reviewer = SourcePolicy.normalized_reviewer(self.policy.reviewer)
+            reviewed = self.policy.reviewed_at
+            if self.policy_status != "approved" or reviewer is None or reviewed is None:
+                raise ValueError(
+                    "Real sources require approved policy and complete review metadata"
+                )
+            utc(reviewed)
+        expiry = self.operations.authorization_expires_at
+        if expiry is not None and utc(expiry) <= datetime.now(UTC):
+            raise ValueError("Source authorization has expired")
 
 
 class FixtureOptions(StrictModel):

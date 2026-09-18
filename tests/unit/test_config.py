@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -188,3 +188,57 @@ def test_optional_authorization_expiry_defaults_to_none() -> None:
         freshness_sla_seconds=1, pause_after_consecutive_failures=1, quota_policy="Local only"
     )
     assert operations.authorization_expires_at is None
+
+
+@pytest.mark.parametrize("filename", ["sources.yml", "sources.example.yml"])
+def test_committed_yandex_requires_manual_review(filename: str) -> None:
+    registry = SourceRegistry.model_validate(
+        yaml.safe_load((Path("config") / filename).read_text(encoding="utf-8"))
+    )
+    source = next(s for s in registry.sources if s.key == "yandex_web_search")
+    assert not source.enabled and source.policy_status == "pending"
+    assert source.policy.reviewer is None and source.policy.reviewed_at is None
+    assert source.owner == "Project owner"
+
+
+@pytest.mark.parametrize(
+    "reviewer,reviewed_at",
+    [
+        (None, "2026-09-18T10:00:00Z"),
+        ("Review sentinel", None),
+        ("", "2026-09-18T10:00:00Z"),
+        (" \t\n", "2026-09-18T10:00:00Z"),
+        ("x" * 161, "2026-09-18T10:00:00Z"),
+        ("Review sentinel", "2026-09-18T10:00:00"),
+        ("Review sentinel\x00", "2026-09-18T10:00:00Z"),
+    ],
+)
+def test_enabled_real_source_requires_review(reviewer: str | None, reviewed_at: str | None) -> None:
+    data = load_config(Path("config")).registry.sources[-1].model_dump()
+    data.update(enabled=True, policy_status="approved")
+    data["policy"].update(reviewer=reviewer, reviewed_at=reviewed_at)
+    with pytest.raises(ValidationError) as caught:
+        SourceConfig.model_validate(data)
+    assert "Review sentinel" not in str(caught.value)
+    assert "2026-09-18" not in str(caught.value)
+
+
+def test_reviewed_source_normalizes_metadata_and_rejects_expiry() -> None:
+    data = load_config(Path("config")).registry.sources[-1].model_dump()
+    data.update(enabled=True, policy_status="approved")
+    data["policy"].update(reviewer="  Project \t owner\n", reviewed_at="2026-09-18T12:00:00+02:00")
+    source = SourceConfig.model_validate(data)
+    assert source.policy.reviewer == "Project owner"
+    assert source.policy.reviewed_at == datetime(2026, 9, 18, 10, tzinfo=UTC)
+    assert source.policy.reviewed_at.tzinfo is UTC
+    data["operations"]["authorization_expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(ValidationError, match="expired"):
+        SourceConfig.model_validate(data)
+
+
+def test_fixture_does_not_require_review(source_config: SourceConfig) -> None:
+    data = source_config.model_dump()
+    data["policy"].update(reviewer=None, reviewed_at=None)
+    source = SourceConfig.model_validate(data)
+    source.check_authorization()
+    assert source.enabled

@@ -52,7 +52,13 @@ def settings(key: str = KEY, folder: str = FOLDER) -> Settings:
 def approved() -> SourceConfig:
     source = load_config(Path("config")).registry.sources[-1]
     return SourceConfig.model_validate(
-        source.model_dump() | {"enabled": True, "policy_status": "approved"}
+        source.model_dump()
+        | {
+            "enabled": True,
+            "policy_status": "approved",
+            "policy": source.policy.model_dump()
+            | {"reviewer": "Test reviewer", "reviewed_at": "2026-09-18T10:00:00Z"},
+        }
     )
 
 
@@ -304,7 +310,7 @@ def test_search_options_fail_closed(changes: dict[str, object]) -> None:
         (KEY, ""),
         ("REPLACE_WITH_YANDEX_SEARCH_API_KEY", FOLDER),
         (KEY + "\n", FOLDER),
-        (KEY, "bad-folder"),
+        (KEY, "REPLACE_WITH_YANDEX_SEARCH_FOLDER_ID"),
     ],
 )
 def test_credentials_are_lazy_and_sanitized(key: str, folder: str) -> None:
@@ -411,3 +417,112 @@ def test_missing_credentials_and_unknown_query_references() -> None:
 )
 def test_nonpublic_or_unusable_host_spellings(url: str) -> None:
     assert public_url(url) is None
+
+
+@pytest.mark.parametrize(
+    "host,path",
+    [
+        ("example.invalid", "/path"),
+        ("Example.invalid:8443", "/a%2Fb?q=%2f&ref=42&q=2&blank="),
+        ("пример.рф", "/путь?id=1+2&ref=%2B"),
+    ],
+)
+def test_single_dns_trailing_dot_preserves_url_identity(host: str, path: str) -> None:
+    dotted_host = host.replace(":", ".:") if ":" in host else host + "."
+    canonical = public_url(f"https://{host}{path}")
+    dotted = public_url(f"https://{dotted_host}{path}")
+    assert canonical is not None and dotted is not None
+    assert dotted == canonical and dotted.endswith(path)
+    assert external_id(dotted) == external_id(canonical)
+
+
+@pytest.mark.parametrize("host", ["example.invalid..", "localhost.", "a.local.", "127.0.0.1."])
+def test_trailing_dot_does_not_allow_invalid_or_private_hosts(host: str) -> None:
+    assert public_url(f"https://{host}/path") is None
+
+
+@pytest.mark.parametrize(
+    "key,folder",
+    [
+        ("k", "f"),
+        ("Synthetic.key+with/slash=", "Folder-42"),
+        ("k" * 4096, "f" * 50),
+        ("header~safe!key", 'папка/"пример"'),
+    ],
+)
+async def test_credential_boundaries_preserve_header_and_json(
+    key: str, folder: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    value = settings(key, folder)
+    api_key, folder_id = value.yandex_access()
+
+    def respond_credentials(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Api-Key {key}"
+        assert json.loads(request.content)["folderId"] == folder
+        return httpx.Response(200, content=payload(b"<yandexsearch/>"))
+
+    provider = YandexSearchProvider(
+        api_key, folder_id, transport=httpx.MockTransport(respond_credentials)
+    )
+    assert (await provider.search("литература", limit=1)).results == ()
+    assert "yandex_search_api_key" not in value.model_dump()
+    assert "yandex_search_folder_id" not in value.model_dump()
+    assert api_key.get_secret_value() == key and folder_id.get_secret_value() == folder
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("field", ["key", "folder"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        " ",
+        "prefix suffix",
+        " prefix",
+        "suffix ",
+        "a\tvalue",
+        "a\nvalue",
+        "a\r\nInjected:yes",
+        "a\x00value",
+        "a\x1fvalue",
+        "a\x7fvalue",
+        "a\x85value",
+        "a\u00a0value",
+        "a\u200bvalue",
+        "a\u2028value",
+        "a\u202evalue",
+        "REPLACE_WITH_VALUE",
+        "replace-with-value",
+        "YOUR_API_KEY",
+        "changeme",
+        "change_me",
+        "placeholder",
+        "<API_KEY>",
+        "${CREDENTIAL}",
+    ],
+)
+def test_unsafe_credentials_fail_lazily_without_echo(field: str, bad: str) -> None:
+    value = settings(bad if field == "key" else KEY, bad if field == "folder" else FOLDER)
+    with pytest.raises(ConfigError) as caught:
+        value.yandex_access()
+    assert str(caught.value) == "Configure valid Yandex Search credentials"
+    config = load_config(Path("config"))
+    assert build_collector(config.registry.sources[0], config, value).key == "fixture"
+
+
+@pytest.mark.parametrize("key,folder", [("k" * 4097, FOLDER), (KEY, "f" * 51), ("ключ", FOLDER)])
+def test_overlong_or_nonascii_header_credentials_are_sanitized(key: str, folder: str) -> None:
+    value = settings(key, folder)
+    with pytest.raises(ConfigError) as caught:
+        value.yandex_access()
+    output = str(caught.value) + repr(value) + value.model_dump_json()
+    assert key not in output and folder not in output
+
+
+@pytest.mark.parametrize("field", ["reviewer", "reviewed_at"])
+def test_factory_rechecks_review_before_credentials(field: str) -> None:
+    config = load_config(Path("config"))
+    source = approved()
+    source.policy = source.policy.model_copy(update={field: None})
+    with pytest.raises(ValueError, match="review metadata"):
+        build_collector(source, config, settings("", ""))

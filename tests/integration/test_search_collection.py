@@ -36,6 +36,9 @@ def approved_config() -> AppConfig:
     config = load_config(Path("config"))
     data = config.model_dump()
     data["registry"]["sources"][-1].update(enabled=True, policy_status="approved")
+    data["registry"]["sources"][-1]["policy"].update(
+        reviewer="Test reviewer", reviewed_at="2026-09-18T10:00:00Z"
+    )
     return AppConfig.model_validate(data)
 
 
@@ -239,4 +242,21 @@ def test_cli_credentials_fail_without_http_or_secret_output(
     assert "ConfigError" in output.err
     assert KEY not in output.err + output.out and FOLDER not in output.err + output.out
     with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(RawItem)) == 0
+
+
+@pytest.mark.parametrize(
+    "field,value", [("reviewer", None), ("reviewed_at", None), ("reviewer", " ")]
+)
+async def test_collection_rechecks_review_after_construction(
+    migrated_engine: Engine, field: str, value: str | None
+) -> None:
+    config = approved_config()
+    source = config.registry.sources[-1]
+    collector = build_collector(source, config, settings(migrated_engine))
+    source.policy = source.policy.model_copy(update={field: value})
+    with pytest.raises(ValueError):
+        await run_collector(migrated_engine, source, collector)
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(CollectionRun)) == 0
         assert session.scalar(select(func.count()).select_from(RawItem)) == 0
