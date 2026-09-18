@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -20,6 +21,7 @@ from tutor_lead_monitor.db import bot_state, delivery
 from tutor_lead_monitor.db.models import (
     CallbackReceipt,
     CollectionRun,
+    CollectorState,
     Feedback,
     Lead,
     LeadOccurrence,
@@ -28,8 +30,10 @@ from tutor_lead_monitor.db.models import (
     NotificationItem,
     NotificationMarker,
     RawItem,
+    Source,
 )
 from tutor_lead_monitor.db.repositories import sync_source
+from tutor_lead_monitor.domain.models import JSONValue
 from tutor_lead_monitor.notifications.base import DeliveryError, FailureKind, FakeNotifier, Message
 from tutor_lead_monitor.notifications.digest import day_bounds
 
@@ -175,7 +179,7 @@ async def test_digest_order_membership_and_immediate_inclusion(
         UUID(hex=b.data[2:]) for _, m in fake.calls for b in m.buttons if b.data.startswith("i:")
     ]
     assert ids == sorted(outside_stats) + sorted([fresh, tie]) + [old, low]
-    assert "Collected: 5" in fake.calls[0][1].html and "review: 1" in fake.calls[0][1].html
+    assert "Собрано: 5" in fake.calls[0][1].html and "на проверку: 1" in fake.calls[0][1].html
     count = len(fake.calls)
     await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
     assert len(fake.calls) == count
@@ -208,8 +212,8 @@ async def test_digest_dst_statistics_are_separate_from_backlog(
     later = seed(migrated_engine, config, when=end)
     fake = FakeNotifier()
     await send_digest(migrated_engine, config, OWNER, fake, day.date(), now=day)
-    assert "Collected: 2" in fake.calls[0][1].html
-    assert "eligible: 4" in fake.calls[0][1].html
+    assert "Собрано: 2" in fake.calls[0][1].html
+    assert "в подборке: 4" in fake.calls[0][1].html
     with Session(migrated_engine) as session:
         assert set(session.scalars(select(NotificationItem.lead_id))) == {
             first,
@@ -393,6 +397,7 @@ async def test_feedback_replay_and_changes_preserve_score_history(
         data=f"i:{lead_id.hex}",
     )
     assert len(fake.answers) == 8
+    assert [message for _, message in fake.answers] == ["Отзыв сохранён."] * 7 + ["Нет доступа."]
     with Session(migrated_engine) as session:
         lead = session.get(Lead, lead_id)
         assert lead is not None and lead.status == "closed"
@@ -408,6 +413,7 @@ async def test_pause_persists_and_explicit_digest_is_allowed(
     await command(
         migrated_engine, config, ACCESS, fake, actor=OWNER, chat=OWNER, name="pause", now=NOW
     )
+    assert fake.sent[-1][1].html == "Доставка приостановлена. Команда /digest остаётся доступной."
     migrated_engine.dispose()  # A new connection/process sees persisted pause state.
     assert bot_state.status_view(migrated_engine, OWNER).paused
     fake.calls.clear()
@@ -417,11 +423,15 @@ async def test_pause_persists_and_explicit_digest_is_allowed(
     await command(
         migrated_engine, config, ACCESS, fake, actor=OWNER, chat=OWNER, name="digest", now=NOW
     )
-    assert any("Digest 2026" in m.html for _, m in fake.calls)
+    assert any("Дайджест за 29.03.2026" in m.html for _, m in fake.calls)
+    assert fake.sent[-1][1].html == (
+        "Дайджест: отправлено — 1, с ошибкой — 0, отложено — 0, доставка занята — нет."
+    )
     await command(
         migrated_engine, config, ACCESS, fake, actor=OWNER, chat=OWNER, name="resume", now=NOW
     )
     assert not bot_state.status_view(migrated_engine, OWNER).paused
+    assert fake.sent[-1][1].html == "Доставка возобновлена."
     assert (await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)).sent == 1
 
 
@@ -440,10 +450,13 @@ async def test_owner_commands(migrated_engine: Engine, config: AppConfig, name: 
     assert len(fake.sent) == 1 and fake.sent[0][0] == OWNER
     output = fake.sent[0][1].html
     if name == "status":
-        assert "Database: connected" in output and "paused: False" in output
-        assert "succeeded" in output and "2026-03-30T09:00:00+02:00" in output
+        assert "База данных: подключена" in output and "Доставка приостановлена: нет" in output
+        assert "завершён успешно" in output and "30.03.2026 в 09:00 · время Рима" in output
+        assert "Тестовые примеры по литературе" in output and "fixture" not in output
     else:
         assert "/digest" in output and "/pause" in output
+        assert "Поиск заявок на занятия с репетитором" in output
+        assert "сегодняшний дайджест, доступен и во время паузы" in output
 
 
 async def test_retention_deletes_chunks_in_dependency_order(
@@ -813,3 +826,113 @@ async def test_lead_markers_expire_with_lead_but_period_stays_sealed(
         migrated_engine, config, OWNER, fake, after_lead_expiry.date(), now=after_lead_expiry
     )
     assert len(fake.calls) == before + 1
+
+
+async def test_delivery_uses_stable_reason_ids_and_original_excerpt(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    excerpt = 'Original  English <post> & "quoted" text\n\tНе переводить.'
+    lead_id = seed(migrated_engine, config, content=excerpt)
+    reasons: list[dict[str, JSONValue]] = [
+        {"rule_id": "literature", "delta": 30, "explanation": "Intentionally unrelated English"},
+        {"rule_id": "future", "delta": 1, "explanation": "Secret English explanation"},
+    ]
+    with Session(migrated_engine) as session, session.begin():
+        lead = session.get(Lead, lead_id)
+        assert lead is not None
+        lead.score_reasons = reasons
+        raw = session.get(RawItem, lead.canonical_raw_item_id)
+        assert raw is not None
+        raw.normalized_text = "A normalized value must never replace the original excerpt"
+        source = session.get(Source, raw.source_id)
+        assert source is not None
+        snapshot = delivery.view(lead, raw, source)
+        assert snapshot.reason_ids == ("literature", "future")
+        assert snapshot.excerpt == excerpt
+    fake = FakeNotifier()
+    await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
+    await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
+    assert len(fake.sent) == 2
+    for _, message in fake.sent:
+        assert excerpt in unescape(message.html)
+        assert "основной предмет — литература; дополнительный фактор оценки" in message.html
+        assert "English explanation" not in message.html and "Intentionally" not in message.html
+        assert "normalized value" not in message.html
+    with Session(migrated_engine) as session:
+        lead = session.get(Lead, lead_id)
+        assert lead is not None and lead.score_reasons == reasons and lead.scoring_version == "test"
+
+
+@pytest.mark.parametrize("kind", ["immediate", "digest"])
+async def test_legacy_english_snapshots_resume_unchanged_new_snapshots_are_russian(
+    migrated_engine: Engine, config: AppConfig, kind: str
+) -> None:
+    lead_id = seed(migrated_engine, config)
+    notification_id: UUID | None
+    if kind == "immediate":
+        notification_id = delivery.reserve_immediate(migrated_engine, OWNER, config, NOW, 1)[0]
+    else:
+        notification_id = delivery.reserve_digest(
+            migrated_engine, OWNER, config, NOW.date(), NOW, True
+        )
+    assert notification_id is not None
+    legacy_text = "<b>Old English frozen snapshot</b>"
+    legacy_buttons: list[dict[str, JSONValue]] = [
+        {"label": "Interested", "data": f"i:{lead_id.hex}"}
+    ]
+    with Session(migrated_engine) as session, session.begin():
+        chunk = session.get(NotificationChunk, (notification_id, 0))
+        assert chunk is not None
+        # Simulate a pending snapshot created by the previous English release.
+        chunk.text, chunk.buttons = legacy_text, legacy_buttons
+    new_id = seed(migrated_engine, config)
+    fake = FakeNotifier()
+    if kind == "immediate":
+        for _ in range(2):
+            await send_immediate(migrated_engine, config, OWNER, fake, now=NOW)
+    else:
+        for _ in range(2):
+            await send_digest(migrated_engine, config, OWNER, fake, NOW.date(), now=NOW)
+        tomorrow = NOW + timedelta(days=1)
+        for _ in range(2):
+            await send_digest(migrated_engine, config, OWNER, fake, tomorrow.date(), now=tomorrow)
+    assert len(fake.sent) == 2
+    assert fake.sent[0][1].html == legacy_text
+    assert fake.sent[0][1].buttons[0].label == "Interested"
+    assert "Почему подходит:" in fake.sent[1][1].html
+    assert any(
+        b.data == f"i:{new_id.hex}" and "Интересно" in b.label for b in fake.sent[1][1].buttons
+    )
+    with Session(migrated_engine) as session:
+        chunk = session.get(NotificationChunk, (notification_id, 0))
+        assert chunk is not None and chunk.text == legacy_text and chunk.buttons == legacy_buttons
+        assert session.scalar(select(func.count()).select_from(Notification)) == 2
+
+
+def test_sync_source_localizes_name_preserving_identity_evidence_and_cursor(
+    migrated_engine: Engine, config: AppConfig
+) -> None:
+    lead_id = seed(migrated_engine, config)
+    source_config = config.registry.sources[0]
+    with Session(migrated_engine) as session, session.begin():
+        source = session.scalars(select(Source)).one()
+        source_id = source.id
+        source.display_name = "Synthetic literature examples"
+        state = session.get(CollectorState, source_id)
+        assert state is not None
+        state.cursor = {"version": 1, "offset": 2}
+        state.consecutive_failures = 2
+    with Session(migrated_engine) as session, session.begin():
+        assert sync_source(session, source_config) == source_id
+    with Session(migrated_engine) as session:
+        updated_source = session.get(Source, source_id)
+        state = session.get(CollectorState, source_id)
+        assert updated_source is not None
+        assert updated_source.display_name == "Тестовые примеры по литературе"
+        assert updated_source.key == source_config.key and updated_source.config[
+            "policy"
+        ] == source_config.policy.model_dump(mode="json")
+        assert state is not None and state.cursor == {"version": 1, "offset": 2}
+        assert state.consecutive_failures == 2
+        assert session.get(Lead, lead_id) is not None
+        assert session.scalar(select(func.count()).select_from(RawItem)) == 1

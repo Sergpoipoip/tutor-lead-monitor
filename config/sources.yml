@@ -1,7 +1,7 @@
 sources:
   - key: fixture
     kind: fixture
-    display_name: Synthetic literature examples
+    display_name: Тестовые примеры по литературе
     owner: Tutor Lead Monitor
     enabled: true
     policy_status: approved
@@ -23,7 +23,7 @@ sources:
     retention_days: 90
   - key: fixture_crosspost
     kind: fixture
-    display_name: Synthetic cross-post examples
+    display_name: Тестовые дубли объявлений
     owner: Tutor Lead Monitor
     enabled: true
     policy_status: approved

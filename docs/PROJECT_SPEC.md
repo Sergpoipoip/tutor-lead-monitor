@@ -178,28 +178,46 @@ Required behavior:
 - split messages safely when Telegram limits are reached;
 - escape user-generated text correctly;
 - include the score, short reason, extracted fields, source, age, excerpt, and original link;
-- include inline feedback buttons: `Interested`, `Not relevant`, `Duplicate`, and `Closed`;
+- include inline feedback buttons: `Интересно`, `Не подходит`, `Дубликат`, and `Закрыто`;
 - persist feedback and acknowledge the button action;
 - support `/start`, `/help`, `/status`, `/digest`, `/pause`, and `/resume` for the authorized user.
 
 The bot must reject administrative commands from unknown Telegram user IDs.
 
+All application-generated Telegram content shown to the owner must be in Russian:
+lead fields, score explanations, digest headers and continuation labels, buttons,
+callback acknowledgements, command replies, status, and errors. Slash command names
+stay unchanged. Dates use `DD.MM.YYYY`; relative ages use `мин`, `ч`, and `дн` without
+depending on the host locale. Status booleans use `да`/`нет`; collection statuses
+have Russian display labels. The configured timezone has a typed, non-secret Russian
+display name (`timezone_display_name: время Рима` for `Europe/Rome`); IANA values
+remain internal to timezone calculations.
+
+Source excerpts retain their original wording, language, and whitespace. Never
+machine-translate or rewrite them. Escape HTML and retain the existing bounded
+excerpt/message limits. Fixture source display names are Russian; machine keys and
+policy metadata remain unchanged. Score explanations are localized using stable
+reason IDs, with a neutral Russian fallback for unknown IDs, never by matching or
+displaying historical English explanations. Internal enums, stored values, callback
+actions, rule IDs, historical score reasons, and scoring versions are unchanged.
+
+Notification chunks are immutable delivery snapshots. Previously frozen English
+messages and buttons may remain English and must resume without rewriting. Every
+newly reserved notification uses Russian presentation. This is a presentation change
+and requires no database migration or localization dependency.
+
 Example alert:
 
 ```text
-🔥 94/100 — new literature tutor request
+94/100 · литература · 10 класс · ЕГЭ · онлайн · срочно
 
-Literature · Grade 10 · Online
-Goal: EGE preparation
+Почему подходит: ищут репетитора; основной предмет — литература; подготовка к ЕГЭ или ОГЭ
+Тестовые примеры по литературе · 14 мин назад
 
-“Looking for a literature tutor for my daughter...”
+Ищу репетитора по литературе для дочери...
 
-Source: VK
-Published: 14 minutes ago
-Why: explicit request + literature + EGE + online
-
-[Open original]
-[Interested] [Not relevant] [Duplicate] [Closed]
+[Открыть оригинал]
+[Интересно] [Не подходит] [Дубликат] [Закрыто]
 ```
 
 ### 5.8 Daily digest
@@ -284,7 +302,7 @@ Secrets belong in environment variables or an external secret store:
 
 Non-secret business configuration belongs in typed settings/YAML:
 
-- timezone and digest time;
+- timezone, Russian timezone display name, and digest time;
 - collector intervals;
 - source registry;
 - query groups;

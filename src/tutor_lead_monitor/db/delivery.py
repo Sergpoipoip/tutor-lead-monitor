@@ -29,7 +29,7 @@ from tutor_lead_monitor.notifications.base import (
     Message,
 )
 from tutor_lead_monitor.notifications.digest import day_bounds
-from tutor_lead_monitor.notifications.formatting import alert, digest_messages
+from tutor_lead_monitor.notifications.formatting import alert, digest_header, digest_messages
 
 ACTIVE = ("new", "notified", "interested")
 MAX_ATTEMPTS = 3
@@ -39,7 +39,7 @@ def view(lead: Lead, raw: RawItem, source: Source) -> LeadView:
     return LeadView(
         lead.id,
         lead.score,
-        tuple(str(r["explanation"]) for r in lead.score_reasons if "explanation" in r),
+        tuple(str(r.get("rule_id", "")) for r in lead.score_reasons),
         lead.subject,
         lead.grade,
         tuple(lead.goals),
@@ -49,7 +49,7 @@ def view(lead: Lead, raw: RawItem, source: Source) -> LeadView:
         lead.budget_text,
         source.display_name,
         raw.published_at,
-        raw.normalized_text or raw.text,
+        raw.text,
         raw.canonical_url or raw.url,
     )
 
@@ -198,11 +198,14 @@ def reserve_digest(
             sum(t.digest <= s < t.immediate for s in scores),
             sum(t.review <= s < t.digest for s in scores),
         )
-        header = (
-            f"Digest {day} · {config.business.timezone}\n"
-            f"Statistics: local calendar day {day} (snapshot)\n"
-            f"Collected: {raw_count}; rejected: {rejected}; new leads: {len(scores)}\n"
-            f"Immediate: {bands[0]}; digest: {bands[1]}; review: {bands[2]}; eligible: {len(rows)}"
+        header = digest_header(
+            day,
+            config.business.timezone_display_name,
+            raw_count,
+            rejected,
+            len(scores),
+            bands,
+            len(rows),
         )
         notification = Notification(
             recipient_key=str(recipient), kind="digest", period_key=day.isoformat()

@@ -14,10 +14,13 @@ from tutor_lead_monitor.domain.models import utc
 from tutor_lead_monitor.notifications.base import Message, Notifier
 from tutor_lead_monitor.notifications.digest import next_digest
 from tutor_lead_monitor.notifications.formatting import safe
+from tutor_lead_monitor.notifications.russian import COLLECTION_STATUSES, display_datetime, yes_no
 
 HELP = (
-    "Tutor Lead Monitor\n/start /help /status /digest /pause /resume\n"
-    "/digest sends today's snapshot, including while paused."
+    "Поиск заявок на занятия с репетитором\n"
+    "/start — начало работы\n/help — справка\n/status — состояние системы\n"
+    "/digest — сегодняшний дайджест, доступен и во время паузы\n"
+    "/pause — приостановить уведомления\n/resume — возобновить уведомления"
 )
 
 
@@ -44,36 +47,44 @@ async def command(
     if not access.authorized(actor, chat):
         return
     instant = utc(now) if now is not None else datetime.now(UTC)
+    zone = ZoneInfo(config.business.timezone)
+    timezone_label = config.business.timezone_display_name
     response = HELP
     try:
         if name == "status":
             try:
                 state = bot_state.status_view(engine, access.recipient)
-                response = (
-                    f"Database: connected\nDelivery paused: {state.paused}\n"
-                    f"Processing pending/failed: {state.pending_processing}/"
-                    f"{state.failed_processing}\n"
-                    f"Notifications pending/failed: {state.pending_notifications}/"
-                    f"{state.failed_notifications}\n"
-                    + "\n".join(
-                        f"{key}: {status} ({finished.isoformat() if finished else 'no completion'})"
-                        for key, status, finished in state.collectors
+                collectors = []
+                for source_name, status, finished in state.collectors:
+                    finished_label = (
+                        f"{display_datetime(finished.astimezone(zone))} · {timezone_label}"
+                        if finished
+                        else "нет времени завершения"
                     )
+                    status_label = COLLECTION_STATUSES.get(status, "состояние неизвестно")
+                    collectors.append(f"{source_name}: {status_label} ({finished_label})")
+                response = (
+                    f"База данных: подключена\nДоставка приостановлена: {yes_no(state.paused)}\n"
+                    f"Обработка — ожидают/с ошибкой: {state.pending_processing}/"
+                    f"{state.failed_processing}\n"
+                    f"Уведомления — ожидают/с ошибкой: {state.pending_notifications}/"
+                    f"{state.failed_notifications}\n" + "\n".join(collectors)
                 )
             except Exception:
-                response = "Database: unavailable\nDelivery state: unknown"
+                response = "База данных: недоступна\nСостояние доставки: неизвестно"
             target = next_digest(instant, config.business).astimezone(
                 ZoneInfo(config.business.timezone)
             )
             response += (
-                f"\nNext configured digest: {target.isoformat()} (manual execution; no scheduler)"
+                f"\nСледующий дайджест по настройкам: {display_datetime(target)} · {timezone_label}"
+                " (запуск вручную)"
             )
         elif name in {"pause", "resume"}:
             bot_state.set_paused(engine, access.recipient, name == "pause")
             response = (
-                "Delivery paused. Explicit /digest remains available."
+                "Доставка приостановлена. Команда /digest остаётся доступной."
                 if name == "pause"
-                else "Delivery resumed."
+                else "Доставка возобновлена."
             )
         elif name == "digest":
             result = await send_digest(
@@ -86,13 +97,13 @@ async def command(
                 explicit=True,
             )
             response = (
-                f"Digest: sent={result.sent}, failed={result.failed}, "
-                f"deferred={result.deferred}, busy={result.busy}."
+                f"Дайджест: отправлено — {result.sent}, с ошибкой — {result.failed}, "
+                f"отложено — {result.deferred}, доставка занята — {yes_no(result.busy)}."
             )
     except AlreadyRunning:
-        response = "Delivery is busy; retry the command shortly."
+        response = "Доставка занята. Повторите команду чуть позже."
     except Exception:
-        response = "Command could not complete. Check local operational status."
+        response = "Не удалось выполнить команду. Проверьте состояние приложения."
     await notifier.send(actor, Message(safe(response, 3700)))
 
 
@@ -107,14 +118,14 @@ async def callback(
     data: str,
 ) -> None:
     if actor not in access.allowed or chat != access.recipient:
-        await notifier.answer(callback_id, "Not authorized.")
+        await notifier.answer(callback_id, "Нет доступа.")
         return
-    response = "Invalid feedback."
+    response = "Некорректный отзыв."
     try:
         match = re.fullmatch(r"([indc]):([0-9a-f]{32})", data)
         if match and 0 < len(callback_id) <= 128:
             applied = bot_state.feedback(engine, actor, callback_id, match[1], UUID(hex=match[2]))
-            response = "Feedback saved." if applied else "Lead no longer available."
+            response = "Отзыв сохранён." if applied else "Заявка больше недоступна."
     except Exception:
-        response = "Feedback could not be saved. Please retry."
+        response = "Не удалось сохранить отзыв. Попробуйте ещё раз."
     await notifier.answer(callback_id, response)

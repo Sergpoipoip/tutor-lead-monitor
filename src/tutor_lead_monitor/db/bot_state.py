@@ -56,7 +56,11 @@ def status_view(engine: Engine, recipient: int) -> StatusView:
                 .limit(1)
             )
             collectors.append(
-                (source.key, run.status if run else "never_run", run.finished_at if run else None)
+                (
+                    source.display_name,
+                    run.status if run else "never_run",
+                    run.finished_at if run else None,
+                )
             )
         return StatusView(
             paused(session, recipient),

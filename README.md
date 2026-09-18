@@ -362,6 +362,31 @@ busy and must be retried. Collection and processing continue.
 
 ### Digest and feedback semantics
 
+All application-generated Telegram text is Russian: lead fields and score reasons,
+headers, buttons, callback acknowledgements, commands, status, and errors. Slash
+commands and compact callback actions are unchanged. Dates use `DD.MM.YYYY`, status
+booleans use `да`/`нет`, and ages use `мин`/`ч`/`дн`; formatting does not depend on the
+host locale. `config/business.yml` supplies `timezone_display_name: время Рима`
+alongside `timezone: Europe/Rome`. Change both together when choosing another zone;
+calculations still use the IANA timezone, including DST.
+
+Cards quote the original raw source text, preserving its language and whitespace,
+with HTML escaping and the existing excerpt limit. Source excerpts are never
+translated or rewritten. Russian score descriptions use stable reason IDs; unknown
+IDs get a neutral Russian fallback. Stored reasons, scoring versions, enum values,
+and rule IDs are unchanged.
+
+After updating an existing local installation, synchronize the Russian fixture
+display names with `uv run tutor-lead-monitor sync-sources`. This updates the same
+source records and preserves their IDs, evidence, cursors, and failure counters;
+source keys and policy metadata are unchanged. As with any registry synchronization,
+it applies the reviewed enabled/policy state from YAML.
+
+No migration or new dependency is needed for localization. Previously frozen
+notification text and buttons remain immutable and may still be English, including
+on retry. Every newly reserved notification uses Russian formatting; localization
+does not recreate already reserved or sent envelopes.
+
 A digest includes all currently active leads at or above the digest threshold that
 have never been reserved in a digest for that recipient. Selection checks prior
 `NotificationItem` membership across all periods and statuses, plus replay markers
@@ -389,7 +414,7 @@ request still works. Thresholds are review 45, digest 55, immediate 90.
 Messages use escaped HTML, HTTP(S) links, bounded excerpts and conservative UTF-16
 limits. Complete cards and links stay intact across chunks. Numbered feedback rows
 identify their digest card; callback data contains only an action and UUID.
-Interested → interested; Not relevant → rejected; Duplicate → duplicate; Closed →
+Интересно → interested; Не подходит → rejected; Дубликат → duplicate; Закрыто →
 closed. Changed choices append feedback; the latest accepted choice wins. Identical
 consecutive choices are no-ops, and replayed callbacks cannot undo later choices.
 Scores/reasons stay unchanged. Authorized callbacks receive an acknowledgement

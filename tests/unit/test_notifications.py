@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from html import unescape
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +23,15 @@ from telegram.error import (
 )
 
 from tutor_lead_monitor.application.bot import OwnerAccess, callback, command
-from tutor_lead_monitor.config import BusinessConfig, ConfigError, Settings, load_config
+from tutor_lead_monitor.config import (
+    BusinessConfig,
+    ConfigError,
+    ScoringWeights,
+    Settings,
+    load_config,
+)
+from tutor_lead_monitor.db.bot_state import StatusView
+from tutor_lead_monitor.db.locks import AlreadyRunning
 from tutor_lead_monitor.notifications.base import (
     DeliveryError,
     FailureKind,
@@ -32,7 +40,23 @@ from tutor_lead_monitor.notifications.base import (
     Message,
 )
 from tutor_lead_monitor.notifications.digest import day_bounds, next_digest
-from tutor_lead_monitor.notifications.formatting import alert, digest_messages, safe, units
+from tutor_lead_monitor.notifications.formatting import (
+    age,
+    alert,
+    digest_header,
+    digest_messages,
+    safe,
+    units,
+)
+from tutor_lead_monitor.notifications.russian import (
+    COLLECTION_STATUSES,
+    FORMATS,
+    GOALS,
+    SCORE_REASONS,
+    SUBJECTS,
+    UNKNOWN_REASON,
+    URGENCY,
+)
 from tutor_lead_monitor.notifications.telegram import TelegramNotifier, classify_error
 
 NOW = datetime(2026, 3, 29, 10, tzinfo=UTC)
@@ -42,7 +66,7 @@ def lead_view() -> LeadView:
     return LeadView(
         UUID(int=1),
         94,
-        ("Tutor request", "Literature"),
+        ("seeking_tutor", "literature"),
         "literature",
         10,
         ("ege",),
@@ -88,7 +112,7 @@ def test_html_escape_and_immutable_views() -> None:
     assert "&lt;репетитора&gt;" in message.html and "&amp;" in message.html
     assert len(message.buttons) == 4
     assert all(len(b.data.encode()) <= 64 and str(lead.id.hex) in b.data for b in message.buttons)
-    assert "0m ago" in message.html and "Grade 10" in message.html
+    assert "0 мин назад" in message.html and "10 класс" in message.html
     with pytest.raises(FrozenInstanceError):
         lead.score = 0  # type: ignore[misc]
     assert "репетитора" not in repr(lead) + repr(message)
@@ -114,7 +138,7 @@ def test_unicode_safe_chunks(cluster: str) -> None:
     leads = tuple(
         replace(lead_view(), id=UUID(int=i), excerpt=cluster * 10000) for i in range(1, 25)
     )
-    messages = digest_messages("Digest", leads, NOW)
+    messages = digest_messages("Дайджест", leads, NOW)
     assert len(messages) > 1
     assert sum(len(m.buttons) for m in messages) == 24 * 4
     for message in messages:
@@ -186,7 +210,7 @@ async def test_unauthorized_and_invalid_callbacks_are_acknowledged() -> None:
         callback_id="b",
         data="private-sentinel",
     )
-    assert fake.answers == [("a", "Not authorized."), ("b", "Invalid feedback.")]
+    assert fake.answers == [("a", "Нет доступа."), ("b", "Некорректный отзыв.")]
 
 
 @pytest.mark.parametrize(
@@ -251,7 +275,7 @@ async def test_status_handles_database_failure_without_exposing_error(
         name="status",
         now=NOW,
     )
-    assert "Database: unavailable" in fake.sent[0][1].html
+    assert "База данных: недоступна" in fake.sent[0][1].html
     assert "sentinel" not in fake.sent[0][1].html
 
 
@@ -264,3 +288,180 @@ def test_telegram_cli_requires_access_settings_before_network(
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     for name in ("telegram-bot", "notify-immediate", "send-digest"):
         assert main([name]) == 1
+
+
+def test_complete_russian_card_and_unchanged_callback_actions() -> None:
+    lead = replace(lead_view(), source="Тестовый источник", location="Рим", excerpt="Ищу учителя")
+    message = alert(lead, NOW)
+    rendered = "".join(ElementTree.fromstring("<root>" + message.html + "</root>").itertext())
+    assert rendered == (
+        "94/100 · литература · 10 класс · ЕГЭ · онлайн · срочно\n"
+        "Место: Рим\nБюджет: 2000 руб\n"
+        "Почему подходит: ищут репетитора; основной предмет — литература\n"
+        "Тестовый источник · 0 мин назад\nИщу учителя\nОткрыть оригинал"
+    )
+    assert [b.label for b in message.buttons] == ["Интересно", "Не подходит", "Дубликат", "Закрыто"]
+    assert [b.data for b in message.buttons] == [f"{a}:{lead.id.hex}" for a in "indc"]
+
+
+@pytest.mark.parametrize(
+    "field,labels",
+    [
+        ("subject", SUBJECTS),
+        ("goals", GOALS),
+        ("format", FORMATS),
+        ("urgency", URGENCY),
+    ],
+)
+def test_all_extracted_enum_labels_are_russian(field: str, labels: dict[str, str]) -> None:
+    for key, label in labels.items():
+        lead = lead_view()
+        lead = replace(
+            lead,
+            subject=key if field == "subject" else lead.subject,
+            goals=(key,) if field == "goals" else lead.goals,
+            format=key if field == "format" else lead.format,
+            urgency=key if field == "urgency" else lead.urgency,
+        )
+        assert label in alert(lead, NOW).html
+
+
+def test_score_reason_localization_covers_every_weight() -> None:
+    assert set(SCORE_REASONS) == set(ScoringWeights.model_fields)
+    for key, label in SCORE_REASONS.items():
+        assert label in alert(replace(lead_view(), reason_ids=(key,)), NOW).html
+    message = alert(replace(lead_view(), reason_ids=("future-private-english-reason",)), NOW)
+    assert UNKNOWN_REASON in message.html and "future-private-english-reason" not in message.html
+
+
+@pytest.mark.parametrize(
+    "seconds,label",
+    [
+        (None, "время публикации неизвестно"),
+        (-1, "0 мин назад"),
+        (0, "0 мин назад"),
+        (60, "1 мин назад"),
+        (3599, "59 мин назад"),
+        (3600, "1 ч назад"),
+        (86399, "23 ч назад"),
+        (86400, "1 дн назад"),
+    ],
+)
+def test_russian_age(seconds: int | None, label: str) -> None:
+    published = NOW - timedelta(seconds=seconds) if seconds is not None else None
+    assert age(published, NOW) == label
+
+
+def test_russian_header_and_continuation() -> None:
+    header = digest_header(date(2026, 1, 2), "время Рима", 0, 0, 0, (0, 0, 0), 1)
+    assert header == (
+        "Дайджест за 02.01.2026 · время Рима\n"
+        "Статистика за календарный день 02.01.2026\n"
+        "Собрано: 0; отсеяно: 0; новых заявок: 0\n"
+        "Срочные: 0; для дайджеста: 0; на проверку: 0; в подборке: 1"
+    )
+    messages = digest_messages(header, (lead_view(),) * 25, NOW)
+    assert messages[0].html.startswith(header)
+    assert len(messages) > 1
+    assert all(m.html.startswith("Продолжение дайджеста") for m in messages[1:])
+    assert "Заявка 25" in messages[-1].html
+
+
+def test_non_russian_excerpt_remains_exact_after_html_escaping() -> None:
+    excerpt = 'Looking  for <a tutor> & "literature".\n\tÀ bientôt! е\u0301'
+    message = alert(replace(lead_view(), excerpt=excerpt), NOW)
+    assert excerpt in unescape(message.html)
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_status_russian_booleans_run_statuses_and_dates(
+    monkeypatch: pytest.MonkeyPatch, paused: bool
+) -> None:
+    state = StatusView(
+        paused,
+        1,
+        2,
+        3,
+        4,
+        tuple(
+            ("Источник", status, None if status == "never_run" else NOW)
+            for status in COLLECTION_STATUSES
+        ),
+    )
+    monkeypatch.setattr("tutor_lead_monitor.db.bot_state.status_view", lambda *args: state)
+    fake = FakeNotifier()
+    await command(
+        cast(Engine, None),
+        load_config(Path("config")),
+        OwnerAccess(frozenset({123}), 123),
+        fake,
+        actor=123,
+        chat=123,
+        name="status",
+        now=NOW,
+    )
+    output = fake.sent[0][1].html
+    assert f"Доставка приостановлена: {'да' if paused else 'нет'}" in output
+    assert "29.03.2026 в 12:00 · время Рима" in output
+    assert "30.03.2026 в 09:00 · время Рима" in output
+    for key, value in COLLECTION_STATUSES.items():
+        assert value in output and key not in output
+    assert all(s not in output for s in ("True", "False", "Europe/Rome"))
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (AlreadyRunning("private"), "Доставка занята. Повторите команду чуть позже."),
+        (RuntimeError("private"), "Не удалось выполнить команду. Проверьте состояние приложения."),
+    ],
+)
+async def test_russian_command_failures(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    def fail(*args: object) -> None:
+        raise error
+
+    monkeypatch.setattr("tutor_lead_monitor.db.bot_state.set_paused", fail)
+    fake = FakeNotifier()
+    await command(
+        cast(Engine, None),
+        load_config(Path("config")),
+        OwnerAccess(frozenset({123}), 123),
+        fake,
+        actor=123,
+        chat=123,
+        name="pause",
+        now=NOW,
+    )
+    assert fake.sent[0][1].html == expected
+
+
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        (True, "Отзыв сохранён."),
+        (False, "Заявка больше недоступна."),
+        (None, "Не удалось сохранить отзыв. Попробуйте ещё раз."),
+    ],
+)
+async def test_russian_callback_results(
+    monkeypatch: pytest.MonkeyPatch, result: bool | None, expected: str
+) -> None:
+    def apply(*args: object) -> bool:
+        if result is None:
+            raise RuntimeError("private")
+        return result
+
+    monkeypatch.setattr("tutor_lead_monitor.db.bot_state.feedback", apply)
+    fake = FakeNotifier()
+    await callback(
+        cast(Engine, None),
+        OwnerAccess(frozenset({123}), 123),
+        fake,
+        actor=123,
+        chat=123,
+        callback_id="test",
+        data=f"i:{UUID(int=1).hex}",
+    )
+    assert fake.answers == [("test", expected)]

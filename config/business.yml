@@ -1,4 +1,5 @@
 timezone: Europe/Rome
+timezone_display_name: время Рима
 digest_time: "09:00:00"
 send_empty_digest: false
 retention:

@@ -572,6 +572,32 @@ class LeadNotifier(Protocol):
 
 Formatting receives immutable view models, not ORM entities. Callback data should carry a compact action and opaque lead identifier, then verify the callback actor against the allowlist.
 
+The Telegram boundary renders all application-generated content in Russian. The
+immutable `LeadView.reason_ids` carries stored stable scoring IDs, not historical
+English explanations. `notifications/russian.py` maps subjects, goals, formats,
+urgency, every `ScoringWeights` feature (including negative features), feedback
+button actions, and collector statuses to Russian labels. Unknown scoring IDs use
+a neutral Russian description without exposing internal IDs or explanations.
+Stored scoring explanations, versions, enums, callback actions, and keys stay intact.
+
+New cards quote `raw_items.text`, never normalized or translated text. Escaping and
+bounded excerpts preserve the original language and visible wording/whitespace;
+Unicode-safe truncation still applies to long excerpts. Digest statistics and backlog
+selection are unchanged. Dates render numerically as `DD.MM.YYYY`, ages as `мин`/`ч`/`дн`,
+status booleans as `да`/`нет`, without system locales or localization dependencies.
+`BusinessConfig.timezone_display_name` is a bounded, non-empty Russian display label
+(default `время Рима`). `timezone` remains `Europe/Rome` internally for DST and
+calendar calculations. `/status` converts both collector completion and next-digest
+timestamps to that zone, displaying the Russian label rather than the IANA name.
+When changing the timezone, configure its matching Russian display name as well.
+
+Fixture `display_name` values are Russian; `sync-sources` upserts existing names by
+stable source key while preserving UUIDs, evidence, cursors, and failure counters.
+Status uses display names rather than machine source keys. Existing frozen
+`notification_chunks` text and buttons are never rewritten during localization or
+retry: old English snapshots remain resumable and immutable. All newly reserved
+snapshots use Russian formatting. No schema migration is needed for localization.
+
 Tests must use a fake notifier; unit tests must never call Telegram.
 
 ## 12. Configuration and secrets

@@ -23,6 +23,7 @@ def test_versioned_configuration() -> None:
     assert config.scoring.weights.offering_tutoring == -70
     assert config.scoring.thresholds.immediate == 90
     assert config.business.retention.leads_days == 90
+    assert config.business.timezone_display_name == "время Рима"
     assert {s.kind for s in config.registry.sources if s.enabled} == {"fixture"}
 
 
@@ -55,6 +56,12 @@ def test_requires_psycopg_postgresql(url: str) -> None:
 def test_bad_timezone(timezone: str) -> None:
     with pytest.raises(ValidationError):
         BusinessConfig(timezone=timezone)
+
+
+@pytest.mark.parametrize("label", ["", "   ", "Europe/Rome", "я" * 81])
+def test_bad_timezone_display_name(label: str) -> None:
+    with pytest.raises(ValidationError):
+        BusinessConfig(timezone_display_name=label)
 
 
 def test_invalid_business_settings() -> None:

@@ -9,7 +9,7 @@ from uuid import UUID
 class LeadView:
     id: UUID
     score: int
-    reasons: tuple[str, ...]
+    reason_ids: tuple[str, ...]
     subject: str
     grade: int | None
     goals: tuple[str, ...]

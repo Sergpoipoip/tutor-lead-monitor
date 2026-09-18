@@ -90,10 +90,18 @@ class DeduplicationConfig(StrictModel):
 
 class BusinessConfig(StrictModel):
     timezone: str = "Europe/Rome"
+    timezone_display_name: str = Field(default="время Рима", min_length=1, max_length=80)
     digest_time: time = time(9)
     send_empty_digest: bool = False
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
+
+    @field_validator("timezone_display_name")
+    @classmethod
+    def valid_timezone_display_name(cls, value: str) -> str:
+        if not value.strip() or not re.search("[А-Яа-яЁё]", value):
+            raise ValueError("Timezone display name must contain a Russian label")
+        return value.strip()
 
     @field_validator("timezone")
     @classmethod

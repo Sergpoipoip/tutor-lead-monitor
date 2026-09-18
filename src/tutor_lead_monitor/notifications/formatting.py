@@ -1,14 +1,23 @@
 import html
 import unicodedata
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from tutor_lead_monitor.domain.models import utc
 from tutor_lead_monitor.notifications.base import Button, LeadView, Message
+from tutor_lead_monitor.notifications.russian import (
+    ACTIONS,
+    FORMATS,
+    GOALS,
+    SCORE_REASONS,
+    SUBJECTS,
+    UNKNOWN_REASON,
+    URGENCY,
+    display_date,
+)
 from tutor_lead_monitor.processing.normalize import canonical_url
 
 MESSAGE_LIMIT = 3800  # Conservative UTF-16 bound, including markup/entities.
-ACTIONS = {"i": "Interested", "n": "Not relevant", "d": "Duplicate", "c": "Closed"}
 
 
 def units(text: str) -> int:
@@ -20,7 +29,7 @@ def safe(text: str, budget: int = 100) -> str:
     clusters: list[str] = []
     for char in text:
         if unicodedata.category(char) == "Cs" or (
-            unicodedata.category(char) == "Cc" and char != "\n"
+            unicodedata.category(char) == "Cc" and char not in "\n\r\t"
         ):
             char = " "
         continuation = (
@@ -51,13 +60,13 @@ def safe(text: str, budget: int = 100) -> str:
 def age(published: datetime | None, now: datetime) -> str:
     instant = utc(now)
     if published is None:
-        return "age unknown"
+        return "время публикации неизвестно"
     seconds = max(0, int((instant - utc(published)).total_seconds()))
     if seconds < 3600:
-        return f"{seconds // 60}m ago"
+        return f"{seconds // 60} мин назад"
     if seconds < 86400:
-        return f"{seconds // 3600}h ago"
-    return f"{seconds // 86400}d ago"
+        return f"{seconds // 3600} ч назад"
+    return f"{seconds // 86400} дн назад"
 
 
 def feedback_buttons(lead_id: UUID) -> tuple[Button, ...]:
@@ -65,22 +74,26 @@ def feedback_buttons(lead_id: UUID) -> tuple[Button, ...]:
 
 
 def lead_card(lead: LeadView, now: datetime) -> str:
-    fields = [lead.subject]
+    fields = [SUBJECTS.get(lead.subject, "предмет не указан")]
     if lead.grade is not None:
-        fields.append(f"Grade {lead.grade}")
-    fields.extend(lead.goals)
-    fields.extend(v for v in (lead.format, lead.urgency) if v != "unknown")
+        fields.append(f"{lead.grade} класс")
+    fields.extend(GOALS.get(goal, "цель не указана") for goal in lead.goals)
+    if lead.format != "unknown":
+        fields.append(FORMATS.get(lead.format, "формат не указан"))
+    if lead.urgency != "unknown":
+        fields.append(URGENCY.get(lead.urgency, "срочность не указана"))
     parts = [f"<b>{lead.score}/100</b> · {safe(' · '.join(fields), 300)}"]
     if lead.location:
-        parts.append(f"Location: {safe(lead.location)}")
+        parts.append(f"Место: {safe(lead.location)}")
     if lead.budget:
-        parts.append(f"Budget: {safe(lead.budget)}")
-    parts.append(f"Why: {safe('; '.join(lead.reasons[:3]), 240)}")
+        parts.append(f"Бюджет: {safe(lead.budget)}")
+    reasons = [SCORE_REASONS.get(reason, UNKNOWN_REASON) for reason in lead.reason_ids[:3]]
+    parts.append(f"Почему подходит: {safe('; '.join(reasons) or 'нет данных', 240)}")
     parts.append(f"{safe(lead.source, 120)} · {age(lead.published_at, now)}")
     parts.append(safe(lead.excerpt, 700))
     url = canonical_url(lead.url)
     if url and not any(ord(c) < 32 for c in url) and units(html.escape(url)) <= 1200:
-        parts.append(f'<a href="{html.escape(url, quote=True)}">Open original</a>')
+        parts.append(f'<a href="{html.escape(url, quote=True)}">Открыть оригинал</a>')
     return "\n".join(parts)
 
 
@@ -88,15 +101,34 @@ def alert(lead: LeadView, now: datetime) -> Message:
     return Message(lead_card(lead, now), feedback_buttons(lead.id))
 
 
+def digest_header(
+    day: date,
+    timezone_label: str,
+    collected: int,
+    rejected: int,
+    new_leads: int,
+    bands: tuple[int, int, int],
+    eligible: int,
+) -> str:
+    day_label = display_date(day)
+    return (
+        f"Дайджест за {day_label} · {timezone_label}\n"
+        f"Статистика за календарный день {day_label}\n"
+        f"Собрано: {collected}; отсеяно: {rejected}; новых заявок: {new_leads}\n"
+        f"Срочные: {bands[0]}; для дайджеста: {bands[1]}; "
+        f"на проверку: {bands[2]}; в подборке: {eligible}"
+    )
+
+
 def digest_messages(header: str, leads: tuple[LeadView, ...], now: datetime) -> tuple[Message, ...]:
     messages: list[Message] = []
     body = safe(header, 600)
     buttons: tuple[Button, ...] = ()
     for index, lead in enumerate(leads, 1):
-        card = f"<b>Lead {index}</b>\n" + lead_card(lead, now)
+        card = f"<b>Заявка {index}</b>\n" + lead_card(lead, now)
         if units(body + "\n\n" + card) > MESSAGE_LIMIT or len(buttons) >= 80:
             messages.append(Message(body, buttons))
-            body, buttons = "Digest continued", ()
+            body, buttons = "Продолжение дайджеста", ()
         body += "\n\n" + card
         buttons += tuple(Button(f"{index} {b.label}", b.data) for b in feedback_buttons(lead.id))
     messages.append(Message(body, buttons))
