@@ -19,6 +19,21 @@ os.environ.setdefault("PTB_TIMEDELTA", "true")
 
 
 @pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests use explicit settings or synthetic dotenv fixtures, never owner secrets."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for name in (
+        "VK_ACCESS_TOKEN",
+        "YANDEX_SEARCH_API_KEY",
+        "YANDEX_SEARCH_FOLDER_ID",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_ALLOWED_USER_IDS",
+        "TELEGRAM_RECIPIENT_CHAT_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def no_real_http(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """All HTTP tests must inject MockTransport, including Yandex and destinations."""
     attempts: list[bool] = []

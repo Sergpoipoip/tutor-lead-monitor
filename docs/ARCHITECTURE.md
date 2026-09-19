@@ -210,7 +210,7 @@ for the endpoint/authentication contract, date-field discrepancy, prices and lim
 
 `collectors/web_search.py` consumes only neutral results and produces `CollectedItem`;
 it never imports classification, deduplication or delivery. The explicit factory in
-`collectors/factory.py` supports fixture and Yandex web search, failing closed for
+`collectors/factory.py` supports fixture, Yandex web search and curated VK walls, failing closed for
 unsupported collectors. Both CLI `collect` and `pipeline` use it. Configuration,
 enabled/approved/expiry gates and lazy credential validation precede provider use;
 enabled non-fixture sources additionally require a nonblank reviewer (normalized
@@ -250,6 +250,45 @@ There are no assumptions about exact lengths, prefixes or alphanumeric formats.
 HTTP transports are mocked in tests, with a guard against all real HTTP. Collection,
 processing and delivery remain explicit manual operations, with production scheduling
 and deployment reserved for Milestone 6.
+
+### Milestone 5A VK boundary
+
+The project-local 5A increment implements only seven owner-selected community walls;
+the milestone definitions and remaining 4B/4C scope are unchanged. `vk_api.py` owns
+the official POST/form wall.get transport, bounded strict JSON parsing, minimal
+immutable post/repost records and safe error categories. `collectors/vk.py` maps
+those records into raw evidence without importing processing or delivery.
+`VKOptions` fixes API version 5.199, binds keys/numeric IDs/screen names to the
+reviewed allowlist, bounds `initial_posts` to 1–20 (default 20), and bounds
+`incremental_posts` to 1–100 (default 100). `VK_ACCESS_TOKEN`
+is a lazy SecretStr excluded from repr and serialization. Source approval, review,
+expiry and stored pause/disable gates apply before HTTP.
+
+Each community has a separate SourceConfig and all existing per-source database
+state. The first request uses count=initial_posts and emits all returned records,
+including any pin, in descending ID order. Subsequent requests use
+count=incremental_posts and emit strictly newer IDs.
+The versioned JSON cursor contains one community ID and its post-ID high-water mark;
+an initialized empty wall uses zero. An old pin is not a chronological boundary.
+A full window without an ordinary ID at/below the saved mark raises cursor_overflow
+before any page is yielded. Cursor/ordinary-post ordering/owner/schema violations
+fail closed. An older surviving ID can establish overlap if the old boundary was
+deleted. The existing atomic persistence and source/external-ID constraint provide
+checkpoint safety and immutable replay. A failed initial VK persistence run with
+items seen and no cursor blocks later collection with cursor_overflow before HTTP;
+otherwise new arrivals could displace failed evidence from the small first window.
+Owner catch-up review must preserve this evidence and audit history. Incremental
+replay keeps the existing cursor and overlap guard. No migration is needed.
+
+Distinct nonempty repost texts join the wrapper verbatim with exactly two newlines
+for existing classification; the combined text cap includes separators. Minimal
+original owner/post IDs and URLs provide provenance for future identity matching.
+Existing deduplication compares canonical occurrence URLs and normalized/fuzzy text,
+not original IDs in metadata; substantially different wrappers can remain separate. No profiles, comments,
+attachments, likes/views or raw responses are retained. Publication time is only
+the numeric post date; collection time is actual UTC. Limits and the exact owner
+smoke-test procedure are in SOURCES §18 and README. No retries, catch-up pagination,
+edit/delete reconciliation, scheduling or production deployment are added.
 
 Use UUID primary keys unless there is a clear reason otherwise. Use timezone-aware timestamps. Add `created_at` and `updated_at` where operationally useful.
 

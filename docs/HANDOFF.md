@@ -1,5 +1,134 @@
 # Tutor Lead Monitor — handoff
 
+## Current update — 2026-09-19, Milestone 5A
+
+This section supersedes the **historical 2026-09-18 snapshot below** wherever status,
+next actions or implementation scope differ. AGENTS.md, PROJECT_SPEC.md,
+ARCHITECTURE.md and SOURCES.md remain authoritative; milestone definitions are unchanged.
+
+The owner explicitly prioritized a bounded **Milestone 5A** VK official wall collector
+before 4B/4C. Reasons: poor/stale Yandex search yield; seven curated active VK communities;
+a successful official API audit; privately retained written VK Support clarification
+permitting the described classification, scoring, minimal storage and private Telegram
+delivery. The owner confirmed the technical smoke-test/audit date as **2026-09-19**:
+API 5.199, service token, 12 calls with no errors, 133 non-pinned posts sampled,
+6 likely literature leads, all communities active within the preceding day. Platform
+Rules revision 2026-08-19 was reviewed by the owner. These are owner-reported findings;
+implementation and tests made no live VK calls. Support correspondence is not published.
+
+The working tree implements seven independent `vk_api` sources, all disabled/pending
+with null policy reviewer/date. All use VK_ACCESS_TOKEN, validated only at collector
+construction, excluded from settings repr/serialization and never logged. The token
+was reported by the owner to be in ignored .env; its value was not displayed. Yandex
+remains disabled/pending and unchanged. Neither approval nor live collection is implied
+by the earlier audit or this implementation.
+
+Implementation: vk_api.py owns one bounded official POST/form wall.get request;
+collectors/vk.py owns one community's versioned post-ID cursor. First runs request
+count=initial_posts (default 20, range 1–20), including pins within that budget. Later
+runs request incremental_posts (default 100, range 1–100) and emit newer IDs only. Empty initial
+walls save zero. Full windows without an ordinary ID at/below the old mark stop with
+cursor_overflow before persistence/checkpoint advancement. No offset cursor, automatic
+retry, catch-up pagination, destination/profile/comment/attachment request, scheduling
+or automatic execution is added. IDs and owner checks preserve source identity; minimal
+repost provenance/text reaches the existing processing pipeline without rewriting it.
+Existing database uniqueness, per-source state and atomic checkpoints are reused;
+no database migration was added. Synthetic contracts and PostgreSQL tests cover the
+new boundary, errors, replay, overflow, failed persistence, isolation and CLI gates.
+
+**Still unimplemented:** 4B authorized Telegram source collection; 4C manual/email/
+notification import; Avito; automatic scheduling; deployment/backups/unattended operation.
+5A is a local increment name, not completion of all of Milestone 5 or a renumbering of
+PROJECT_SPEC. The existing Telegram bot still handles delivery/owner commands/feedback.
+
+**Next owner action:** review the new disabled configuration and verification results,
+then explicitly authorize only vk_ishchu_repetitora (218494134) for the first application
+smoke test with initial_posts: 5. Follow README's exact procedure and SOURCES §18.
+Complete policy reviewer/aware timestamp/notes/expiry, keep the other six VK sources
+and Yandex disabled, validate configuration, prepare local PostgreSQL/migrations and
+sync sources. Only the explicit collect command contacts VK. With no cursor it
+requests count=5, retrieves at most five posts including any pin, and retains at most
+five. A separately authorized subsequent run uses incremental_posts (default 100). Review evidence
+privately before processing/delivery. Do not reset any existing cursor to create a
+"first" run. Restoring initial_posts to 20 does not backfill older excluded posts.
+Overflow recovery requires separate review; never advance a cursor to hide a gap.
+Failed first-run persistence with observed items and no cursor also blocks retries
+before HTTP, preventing failed evidence from being displaced by newer arrivals.
+Preserve evidence and audit history for recovery. Repost provenance is retained;
+current deduplication still matches occurrence URLs/text, not original IDs in metadata.
+
+Git baseline for this work: main at 4cb4cc14e0b9763e4b9a3f6c5030d88a33af21b8
+(docs: add project handoff). This task does not commit, push or merge; changes remain
+in the working tree for owner review. Do not infer a current HEAD from this snapshot.
+
+The earlier implementation reported 608 passing tests; that is historical evidence,
+not verification of this hardening pass. Independent review reproduced first-run
+oversampling, a combined-text separator bound defect, and late parser success past
+the operation deadline. Those defects are fixed; failed-bootstrap retries now fail
+closed. Fresh verification results follow.
+No live application VK compatibility has been established: the owner-run API audit
+is distinct from the still-pending first collector smoke test. During this review
+.env was not read, including by Settings, tests, Alembic or Compose.
+
+**Fresh independent verification, 2026-09-19:** 647 passed (528 unit, 119 PostgreSQL
+integration), no skips. The first targeted regressions reproduced three failures
+before the fixes (request count, combined text bound, parser deadline). The full
+suite then passed against a newly created disposable PostgreSQL 17 container using
+a cached image with --pull=never and a loopback-only published port. It was removed
+after verification; no owner database was used. Ruff lint and formatting (76 files),
+strict mypy (70 files), offline lock/sync/build, Compose, actionlint and configuration
+validation passed. Alembic current was b35778628004 (head); drift, downgrade base /
+upgrade head / drift, and offline SQL generation passed. Fixture preview, healthcheck,
+failed-record inspection and retention dry run also passed on an empty disposable DB.
+The temporary CLI verification runner initially used a nonexistent package entrypoint;
+correcting it to tutor_lead_monitor.cli made those checks pass. This was a verification
+harness error, not an application defect. CI and live provider APIs were not queried.
+
+Exact commands used (from the repository root):
+
+```sh
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/mypy
+uv --offline lock --check
+uv --offline sync --locked
+uv --offline build
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py pytest tests/unit tests/integration -q
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic current
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic check
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic downgrade base
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic upgrade head
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic check
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py alembic upgrade head --sql > /private/tmp/tlm-vk-review-migrations.sql
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py tutor_lead_monitor.cli check-config
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py tutor_lead_monitor.cli healthcheck
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py tutor_lead_monitor.cli fixture
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py tutor_lead_monitor.cli failed --limit 20
+.venv/bin/python /private/tmp/tlm-vk-review-safe.py tutor_lead_monitor.cli retention --dry-run
+env -i PATH="$PATH" HOME="$HOME" POSTGRES_ADMIN_PASSWORD=synthetic-review-only POSTGRES_APP_PASSWORD=synthetic-review-only docker compose --env-file /dev/null -f docker-compose.yml config --quiet
+docker run --pull=never --network=none --rm -i rhysd/actionlint:latest - < .github/workflows/ci.yml
+git diff --check
+```
+
+The temporary safe wrapper disables Settings' default dotenv, removes provider secret
+environment variables and rejects any attempt to open the repository .env via a Python
+audit hook before running the named module. The temporary container runner supplies
+DATABASE_URL/TEST_DATABASE_URL for its newly created disposable `_test` database and
+REQUIRE_INTEGRATION_TESTS=1. These temporary scripts are review artifacts, not project
+entrypoints; do not run database checks on an owner database or assume these artifacts
+exist in another environment. Tests now independently disable default dotenv loading
+and clear provider credentials, while explicit synthetic dotenv fixtures still work.
+
+All seven key/ID/screen-name/display-name tuples were checked against the approved list;
+all seven VK sources and Yandex remain disabled/pending with null reviewer/date. A
+signature scan of tracked and nonignored untracked files found no credential candidates;
+.env was excluded without opening it. Build archive filename checks found no .env.
+No files were committed, no real VK post text was printed, and no live provider call
+was made. Signature scanning does not establish whether arbitrary strings are valid
+credentials; no comparison with the private .env was performed.
+
+---
+
 ## 1. Date, purpose and authority
 
 Snapshot: **2026-09-18**, for a fresh Codex chat resuming this repository.
