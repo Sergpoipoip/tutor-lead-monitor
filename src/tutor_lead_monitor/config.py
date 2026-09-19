@@ -17,7 +17,7 @@ PositiveInt = Annotated[int, Field(gt=0)]
 Score = Annotated[int, Field(ge=0, le=100)]
 
 
-def _valid_yandex_secret(value: SecretStr | None, *, maximum: int, header: bool) -> bool:
+def _valid_provider_secret(value: SecretStr | None, *, maximum: int, header: bool) -> bool:
     if value is None:
         return False
     text = value.get_secret_value()
@@ -52,12 +52,20 @@ class Settings(BaseSettings):
     yandex_search_api_key: SecretStr | None = Field(default=None, exclude=True)
     # Treat the deployment-specific folder ID as sensitive too.
     yandex_search_folder_id: SecretStr | None = Field(default=None, exclude=True)
+    vk_access_token: SecretStr | None = Field(default=None, exclude=True, repr=False)
+
+    def vk_access(self) -> SecretStr:
+        # A form-body secret, not an undocumented provider-specific token pattern.
+        token = self.vk_access_token
+        if not _valid_provider_secret(token, maximum=4096, header=False) or token is None:
+            raise ConfigError("Configure valid VK credentials")
+        return token
 
     def yandex_access(self) -> tuple[SecretStr, SecretStr]:
         key, folder = self.yandex_search_api_key, self.yandex_search_folder_id
         if (
-            not _valid_yandex_secret(key, maximum=4096, header=True)
-            or not _valid_yandex_secret(folder, maximum=50, header=False)
+            not _valid_provider_secret(key, maximum=4096, header=True)
+            or not _valid_provider_secret(folder, maximum=50, header=False)
             or key is None
             or folder is None
         ):
@@ -263,7 +271,12 @@ class SourceOperations(StrictModel):
 class SourceConfig(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     kind: Literal[
-        "fixture", "web_search", "telegram_bot_updates", "manual_import", "avito_notifications"
+        "fixture",
+        "web_search",
+        "vk_api",
+        "telegram_bot_updates",
+        "manual_import",
+        "avito_notifications",
     ]
     display_name: str = Field(min_length=1)
     owner: str = Field(min_length=1)
@@ -283,7 +296,7 @@ class SourceConfig(StrictModel):
     def enablement(self) -> Self:
         if self.enabled and self.policy_status != "approved":
             raise ValueError("Enabled sources require approved policy")
-        if self.enabled and self.kind not in {"fixture", "web_search"}:
+        if self.enabled and self.kind not in {"fixture", "web_search", "vk_api"}:
             raise ValueError("Unsupported collector kind")
         if self.enabled and self.kind != "fixture":
             self.check_authorization()
@@ -298,6 +311,12 @@ class SourceConfig(StrictModel):
             ):
                 raise ValueError("Yandex requires official_api and its credential environment name")
             WebSearchOptions.model_validate(self.config)
+        elif self.kind == "vk_api":
+            if self.access_method != "official_api" or self.credential_env != "VK_ACCESS_TOKEN":
+                raise ValueError("VK requires official_api and its credential environment name")
+            options = VKOptions.model_validate(self.config)
+            if VK_COMMUNITIES[options.community_id] != (self.key, options.screen_name):
+                raise ValueError("VK source must match the reviewed community allowlist")
         return self
 
     def check_authorization(self) -> None:
@@ -318,6 +337,33 @@ class SourceConfig(StrictModel):
 class FixtureOptions(StrictModel):
     page_size: PositiveInt = 2
     dataset: Literal["primary", "crosspost"] = "primary"
+
+
+# This increment is restricted to the owner's seven reviewed communities.
+VK_COMMUNITIES = {
+    44923684: ("vk_repetera", "repetera"),
+    218494134: ("vk_ishchu_repetitora", "ishchu_repetitora"),
+    69560393: ("vk_vakrep", "vakrep"),
+    236075282: ("vk_kaliningrad", "club236075282"),
+    236062075: ("vk_ulyanovsk", "club236062075"),
+    181505950: ("vk_repetitor_poisk", "repetitor_poisk"),
+    236082001: ("vk_ulan_ude", "club236082001"),
+}
+
+
+class VKOptions(StrictModel):
+    community_id: int = Field(gt=0, strict=True)
+    screen_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    api_version: Literal["5.199"] = "5.199"
+    initial_posts: int = Field(default=20, ge=1, le=20, strict=True)
+    incremental_posts: int = Field(default=100, ge=1, le=100, strict=True)
+
+    @field_validator("community_id")
+    @classmethod
+    def reviewed_community(cls, value: int) -> int:
+        if value not in VK_COMMUNITIES:
+            raise ValueError("VK community is outside the reviewed allowlist")
+        return value
 
 
 class WebSearchOptions(StrictModel):

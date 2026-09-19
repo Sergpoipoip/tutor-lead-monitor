@@ -1,6 +1,6 @@
 # Tutor Lead Monitor
 
-Milestones 1–3 plus Milestone 4A: a local pipeline for permitted literature-tutor
+Milestones 1–3 plus Milestones 4A and 5A: a local pipeline for permitted literature-tutor
 requests. Read the authoritative [product specification](docs/PROJECT_SPEC.md),
 [architecture](docs/ARCHITECTURE.md), and [source policy](docs/SOURCES.md), version 0.2.
 
@@ -9,7 +9,8 @@ persistence, normalization, rule classification, conservative extraction,
 explainable scoring, exact/fuzzy deduplication, and retention with dry-run counts.
 Telegram alerts, digests, owner commands, and feedback are implemented for explicit
 local execution. The first real collector, Yandex Search API, is implemented but
-disabled pending owner review. Other real collectors, scheduling, and deployment
+disabled pending owner review. Milestone 5A adds seven disabled/pending official VK
+wall collectors. Other real collectors, scheduling, and deployment
 remain later milestones. Fixtures and processing require no provider credentials.
 
 ## Local setup
@@ -196,7 +197,7 @@ both in tests. All non-secret business settings are version-controlled YAML.
 | `config/processing.yml` | Classifier version, regex rules, priorities, confidence, boilerplate |
 | `config/scoring.yml` | Score version, weights, thresholds, freshness/stale periods |
 | `config/business.yml` | Timezone, local digest preferences, retention, deduplication |
-| `config/sources.yml` | Enabled fixtures, disabled Yandex source and operations policy |
+| `config/sources.yml` | Enabled fixtures, disabled Yandex and seven VK sources, operations policy |
 | `config/sources.example.yml` | Disabled future-source reference, not automatically loaded |
 | `config/queries.yml` | Query groups and executable searches selected by stable IDs |
 | `DATABASE_URL` | Required `postgresql+psycopg://` URL |
@@ -205,6 +206,7 @@ both in tests. All non-secret business settings are version-controlled YAML.
 | `HEALTH_INTERVAL_SECONDS` | Foundation health polling interval, defaults to 30 |
 | `YANDEX_SEARCH_API_KEY` | Secret API key; validated only for explicit Yandex collection |
 | `YANDEX_SEARCH_FOLDER_ID` | Private deployment folder ID; same lazy validation |
+| `VK_ACCESS_TOKEN` | Service token, validated lazily when building an approved VK collector |
 
 Validation rejects unknown YAML fields, duplicate source/rule IDs, invalid regexes,
 invalid timezones, nonpositive intervals, overlapping score bands, unapproved
@@ -553,6 +555,132 @@ if it rejects the new fields. No database migration is needed for Milestone 4A.
 All HTTP tests use fake transports; a suite-wide guard rejects real HTTP transport,
 including accidental Yandex or destination requests. Telegram, digest time
 (09:00 Europe/Rome), thresholds (45/55/90), and frozen snapshots remain unchanged.
+
+## Milestone 5A — seven curated VK communities
+
+The owner explicitly prioritized this bounded increment before Milestones 4B/4C.
+This does not renumber PROJECT_SPEC milestones or mark Telegram source collection,
+manual/email/notification import, Avito, scheduling or deployment complete. Yandex
+4A remains implemented but disabled/pending: owner experiments found mostly stale,
+poor-quality search results. The curated VK audit found 6 likely literature leads
+among 133 non-pinned samples; all seven communities had activity in the previous day.
+These are owner-reported discovery observations, not a guarantee of future yield.
+
+The **owner-run technical smoke test and seven-community audit were on 2026-09-19**:
+12 official API calls, no errors, service token, API version 5.199. No live VK calls
+were made during this implementation or its tests. Written VK Support clarification
+is retained privately by the owner; the reported permission covers classification,
+scoring, minimal storage and private Telegram delivery. The owner reviewed Platform
+Rules revision 2026-08-19. Operational review fields remain null until enablement.
+
+| Source key | Community ID | Screen name |
+|---|---:|---|
+| `vk_repetera` | 44923684 | repetera |
+| `vk_ishchu_repetitora` | 218494134 | ishchu_repetitora |
+| `vk_vakrep` | 69560393 | vakrep |
+| `vk_kaliningrad` | 236075282 | club236075282 |
+| `vk_ulyanovsk` | 236062075 | club236062075 |
+| `vk_repetitor_poisk` | 181505950 | repetitor_poisk |
+| `vk_ulan_ude` | 236082001 | club236082001 |
+
+Each `vk_api` source has independent database state, cursor, run history and failure
+count. All use `VK_ACCESS_TOKEN` from ignored `.env` or protected environment settings;
+Compose passes it to application services. The value is excluded from settings repr
+and serialization. Missing, empty, whitespace/control-containing, placeholder and
+oversized values fail lazily without echoing input. No exact token format is assumed.
+Only the seven configured key/ID/screen-name combinations are supported in 5A.
+
+One explicit run makes one POST to `https://api.vk.com/method/wall.get`, with the
+service token only in its form body, `v=5.199`, the negative community owner ID,
+`filter=all`, `extended=0`, and `offset=0`. **The first request uses
+`count=initial_posts` (default 20, allowed 1–20); five means at most five retrieved
+posts, including any pin.** All returned posts are emitted in descending post-ID
+order. Later requests use `count=incremental_posts` (default 100, allowed 1–100)
+and persist only IDs above the saved cursor. No user/profile,
+comment, member or attachment request is made; unneeded response fields are discarded.
+
+The cursor is `{version: 1, community_id: ..., post_id: ...}`. Offset is never saved.
+An empty first wall stores `post_id: 0`; subsequent empty walls preserve the mark.
+An old pinned post is not evidence of chronological overlap. A full incremental window
+without an ordinary post at or below the mark fails with `cursor_overflow` before
+persistence or cursor advancement, including 99 new posts plus an old pin at the
+default limit of 100. A deleted
+old boundary is harmless when another older ordinary post proves overlap. Duplicates,
+wrong owners, unexpected ordering, incomplete windows and malformed schemas fail
+closed. Do not reset/advance a cursor to bypass overflow: stop the source and arrange
+a separately reviewed catch-up procedure. A first run with failed persistence and
+no saved cursor also blocks further collection with `cursor_overflow` before HTTP:
+a new small first window could otherwise skip failed evidence. Preserve the run
+history and raw items for recovery review. Incremental persistence failures keep
+the prior cursor and can replay if the new window still proves overlap. Automatic
+pagination/backfill is absent. An old pin consumes one initial slot; with
+`initial_posts: 1`, a pin-only first sample can require catch-up review on the next run.
+
+External IDs are `community_id_post_id`; URLs are
+`https://vk.ru/wall-community_id_post_id` (with the literal minus before community ID).
+Publication time comes only from the numeric UNIX `date`; collection time is actual
+UTC, unaffected by `--as-of`. Text is preserved verbatim. Repost wrapper and original
+distinct nonempty texts are joined with exactly two newline characters (`\n\n`) for the existing classifier; original texts are
+not translated or paraphrased. Only original owner/post IDs and generated URLs are
+kept as repost metadata for provenance and future identity matching. Current
+deduplication uses canonical occurrence URLs and normalized/fuzzy text; it does not
+match original IDs from this metadata. Bare reposts can merge through equal text,
+while substantially different wrapper wording may remain separate. There is no
+original-post fetch. Raw evidence is immutable;
+edits to already-seen IDs are not re-ingested, and absence from a top page is not a
+delete signal. Attachment-only posts retain empty text and receive normal processing.
+
+Timeouts are connect/write/pool 10s, read 30s, total 45s. Responses are capped at 2 MiB,
+text at 65,536 characters per post including repost text and separators, and repost history at five
+entries over three levels. Uncompressed UTF-8 JSON is required; redirects, environment
+proxies, automatic retries and automatic execution are disabled. Sanitized categories:
+`authentication`, `access_or_policy`, `rate_limit_or_quota`, `transport`, `timeout`,
+`malformed_response`, `response_too_large`, `invalid_configuration`, `cursor_overflow`,
+`permanent_request`. Errors never include provider bodies, parameters or headers.
+Failure counters are stored, but threshold-based automatic pausing remains future work.
+
+The 3,600-second interval is configuration only. Seven hourly sources would use about
+5,040 calls in 30 days; the owner-reported unverified-profile limit on 2026-09-19 was
+10,000/month. Tests use MockTransport and consume no quota. Manual reruns, setup/administrative calls and other
+applications also use quota; review the current account limit before enablement.
+
+### First application smoke test: only vk_ishchu_repetitora
+
+1. Recheck official access, current quota/terms, retention and the privately retained
+   support clarification. Keep the existing service token only in ignored `.env`
+   as `VK_ACCESS_TOKEN`; ensure no stale shell variable overrides it. Do not paste it
+   into commands, Git, logs or chat.
+2. In `config/sources.yml`, edit **only** `vk_ishchu_repetitora`: set
+   `config.initial_posts: 5`; complete `policy.reviewer`, timezone-aware
+   `policy.reviewed_at`, review notes and authorization expiry when applicable.
+   Only after explicit owner approval set `policy_status: approved`, `enabled: true`.
+   Keep the other six VK sources and Yandex disabled/pending. Confirm this source
+   has no existing cursor before treating the run as a first-run smoke test; preserve
+   any existing cursor/history and review it rather than resetting it.
+3. Start local PostgreSQL if necessary, then run these explicit commands:
+
+```sh
+uv run tutor-lead-monitor check-config
+uv run tutor-lead-monitor migrate
+uv run tutor-lead-monitor sync-sources
+uv run tutor-lead-monitor collect --source vk_ishchu_repetitora
+```
+
+Only the last command contacts VK: exactly one wall.get request with `count=5`,
+retrieving and persisting at most five posts including any pin. It does not process or deliver. Do not use
+`pipeline` for this smoke test. Privately inspect sanitized run counts, stored raw
+text/repost provenance and the saved cursor. A separately authorized replay costs
+one additional call with `count=incremental_posts` (default 100) and should insert
+zero records unless new posts appeared.
+Run `process` and delivery only after reviewing results; these commands can include
+pending work from other sources. Changing `initial_posts` to 20 after the test does
+not backfill older posts excluded by the first-run limit.
+
+Emergency disable: set `enabled: false`, optionally `policy_status: paused`, run
+`sync-sources`, and stop in-flight collection; revoke a compromised token in VK.
+Preserve source IDs, cursors and evidence. Started requests cannot be recalled.
+No migration or database rollback is needed. See [SOURCES §18](docs/SOURCES.md#18-milestone-5a--curated-vk-wall-collection)
+for review provenance and the official schema references.
 
 ## Before later source milestones
 

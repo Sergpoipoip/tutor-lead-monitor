@@ -13,6 +13,7 @@ from tutor_lead_monitor.db.models import CollectionRun, CollectorState, Source
 from tutor_lead_monitor.db.repositories import persist_page, sync_source
 from tutor_lead_monitor.domain.models import CollectionContext, CollectionPage, utc
 from tutor_lead_monitor.search.base import SearchError
+from tutor_lead_monitor.vk_api import VKError, VKFailure
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ async def run_collector(
 ) -> CollectionResult:
     if collector.key != config.key or not config.enabled or config.policy_status != "approved":
         raise ValueError("Collector must match an enabled approved source")
-    if config.kind not in {"fixture", "web_search"}:
+    if config.kind not in {"fixture", "web_search", "vk_api"}:
         raise ValueError("Unsupported collector kind")
     config.check_authorization()
     now = datetime.now(UTC)
@@ -52,6 +53,23 @@ async def run_collector(
                 .where(CollectionRun.source_id == source_id, CollectionRun.status == "running")
                 .values(status="failed", finished_at=now, error_category="interrupted")
             )
+            # A truncated first VK window has no durable lower boundary. Retrying
+            # it after new arrivals could skip a previously failed item forever.
+            # Preserve evidence/state and require owner catch-up review instead.
+            incomplete_vk_bootstrap = (
+                config.kind == "vk_api"
+                and state.cursor is None
+                and session.scalar(
+                    select(CollectionRun.id)
+                    .where(
+                        CollectionRun.source_id == source_id,
+                        CollectionRun.status.in_(("failed", "partial")),
+                        CollectionRun.items_seen > 0,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
             context = CollectionContext(
                 None if state.cursor is not None else state.high_water_mark,
                 state.cursor,
@@ -63,6 +81,8 @@ async def run_collector(
         checkpoint = context.cursor
         retry_after: int | None = None
         try:
+            if incomplete_vk_bootstrap:
+                raise VKError(VKFailure.OVERFLOW)
             async for page in collector.collect(context):
                 seen += len(page.items)
                 page_failed = 0
@@ -116,7 +136,9 @@ async def run_collector(
                     raise
         except Exception as error:
             error_category = (
-                error.category.value if isinstance(error, SearchError) else type(error).__name__
+                error.category.value
+                if isinstance(error, (SearchError, VKError))
+                else type(error).__name__
             )
             if isinstance(error, SearchError):
                 retry_after = error.retry_after

@@ -28,6 +28,7 @@ from tutor_lead_monitor.db.repositories import sync_source
 from tutor_lead_monitor.db.session import check_database, create_db_engine, session_factory
 from tutor_lead_monitor.domain.models import CollectionContext, utc
 from tutor_lead_monitor.logging import configure_logging
+from tutor_lead_monitor.vk_api import VKError
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +246,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "collection_failed",
                         extra={
                             "source_key": source.key,
-                            "error_category": type(error).__name__,
+                            "error_category": error.category.value
+                            if isinstance(error, VKError)
+                            else type(error).__name__,
                         },
                     )
             if args.command == "collect":
@@ -280,7 +283,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except Exception as error:
         # SQLAlchemy/provider/validation exceptions may embed credentials or input text.
-        logger.error("command_failed", extra={"error_category": type(error).__name__})
+        logger.error(
+            "command_failed",
+            extra={
+                "error_category": error.category.value
+                if isinstance(error, VKError)
+                else type(error).__name__
+            },
+        )
         return 1
     finally:
         if engine is not None:
